@@ -59,18 +59,18 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
     resultStr.length > 500 ? resultStr.slice(0, 500) + "…" : resultStr;
 
   return (
-    <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 text-sm overflow-hidden">
+    <div className="rounded-lg border border-zinc-700 bg-zinc-800/60 text-sm overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 text-zinc-700 dark:text-zinc-300">
+      <div className="flex items-center gap-2 px-3 py-2 text-zinc-300">
         {icon}
         <span className="font-mono text-xs font-medium">{toolCall.name}</span>
         {!toolCall.done ? (
-          <span className="ml-auto flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+          <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
             <Loader2 className="size-3 animate-spin" />
             running
           </span>
         ) : (
-          <span className="ml-auto flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+          <span className="ml-auto flex items-center gap-1 text-xs text-village">
             <Check className="size-3" />
             done
           </span>
@@ -79,23 +79,23 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
 
       {/* Args summary */}
       {summary && (
-        <div className="px-3 pb-2 font-mono text-xs text-zinc-500 dark:text-zinc-400 truncate">
+        <div className="px-3 pb-2 font-mono text-xs text-zinc-400 truncate">
           {summary}
         </div>
       )}
 
       {/* Result */}
       {toolCall.done && resultPreview && (
-        <div className="border-t border-zinc-200 dark:border-zinc-700">
+        <div className="border-t border-zinc-700">
           <button
             onClick={() => setExpanded(!expanded)}
-            className="flex items-center gap-1 w-full px-3 py-1.5 text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 transition-colors text-left"
+            className="flex items-center gap-1 w-full px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/50 transition-colors text-left"
           >
             {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
             Result
           </button>
           {expanded && (
-            <pre className="px-3 py-2 text-xs text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words max-h-48 overflow-auto">
+            <pre className="px-3 py-2 text-xs text-zinc-300 whitespace-pre-wrap break-words max-h-48 overflow-auto">
               {resultPreview}
             </pre>
           )}

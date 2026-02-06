@@ -1,1 +1,7 @@
 @import "tailwindcss";
+
+@theme {
+  --color-village: #37926F;
+  --color-village-dark: #267558;
+  --color-village-light: #59AE8A;
+}

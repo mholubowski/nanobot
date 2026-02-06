@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { streamChat, type AgentEvent } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
-import { Send, Bot } from "lucide-react";
+import { Send } from "lucide-react";
+import { VillageLogo } from "./VillageLogo";
 
 export type ToolCall = {
   id: string;
@@ -106,19 +107,19 @@ export default function App() {
   }, [input, isLoading]);
 
   return (
-    <div className="flex flex-col h-dvh bg-zinc-50 dark:bg-zinc-950">
+    <div className="flex flex-col h-dvh bg-zinc-950">
       {/* Header */}
-      <header className="flex items-center gap-2 px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-        <Bot className="size-5 text-indigo-500" />
-        <h1 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">nanobot</h1>
+      <header className="flex items-center gap-2.5 px-4 py-3 border-b border-zinc-800 bg-zinc-900">
+        <VillageLogo className="size-5 text-village" />
+        <h1 className="text-sm font-semibold text-zinc-200">Village Agent</h1>
       </header>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-zinc-400 dark:text-zinc-600 gap-2">
-            <Bot className="size-10" />
-            <p className="text-sm">Send a message to get started.</p>
+          <div className="flex flex-col items-center justify-center h-full text-zinc-600 gap-3">
+            <VillageLogo className="size-12 text-village/40" />
+            <p className="text-sm text-zinc-500">Send a message to get started.</p>
           </div>
         )}
         {messages.map((msg, i) => (
@@ -128,7 +129,7 @@ export default function App() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+      <div className="border-t border-zinc-800 bg-zinc-900 p-4">
         <form
           className="flex items-center gap-2 max-w-3xl mx-auto"
           onSubmit={(e) => {
@@ -140,15 +141,15 @@ export default function App() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask nanobot anything..."
+            placeholder="Ask Village Agent anything..."
             disabled={isLoading}
-            className="flex-1 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-4 py-2.5 text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-village/60 disabled:opacity-50"
             autoFocus
           />
           <button
             type="submit"
             disabled={isLoading || !input.trim()}
-            className="rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 p-2.5 text-white transition-colors"
+            className="rounded-lg bg-village hover:bg-village-dark disabled:opacity-40 p-2.5 text-white transition-colors"
           >
             <Send className="size-4" />
           </button>
