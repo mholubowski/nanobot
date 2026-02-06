@@ -33,6 +33,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -52,12 +56,13 @@ packages = ["nanobot"]
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"
 
-# Include non-Python files in skills
+# Include non-Python files in skills and web static assets
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
+    "nanobot/web/static/**",
 ]
 
 [tool.hatch.build.targets.sdist]

@@ -3,7 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from loguru import logger
 
@@ -367,3 +367,128 @@ class AgentLoop:
         
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    async def process_with_events(
+        self,
+        content: str,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]],
+        session_key: str = "web:default",
+        channel: str = "web",
+        chat_id: str = "default",
+    ) -> str:
+        """
+        Process a message with streaming events for the web UI.
+
+        Like process_direct() but calls on_event() at each step so the
+        frontend can show progress in real time.
+
+        Events emitted:
+            ("thinking", {})                          - about to call LLM
+            ("tool_call", {"id", "name", "args"})     - tool invocation starting
+            ("tool_result", {"id", "name", "result"}) - tool returned
+            ("text", {"content"})                     - final response text
+
+        Args:
+            content: The user message.
+            on_event: Async callback receiving (event_type, data).
+            session_key: Session identifier.
+            channel: Source channel label.
+            chat_id: Source chat ID.
+
+        Returns:
+            The agent's final text response.
+        """
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="user",
+            chat_id=chat_id,
+            content=content,
+        )
+
+        session = self.sessions.get_or_create(session_key)
+
+        # Update tool contexts
+        message_tool = self.tools.get("message")
+        if isinstance(message_tool, MessageTool):
+            message_tool.set_context(msg.channel, msg.chat_id)
+
+        spawn_tool = self.tools.get("spawn")
+        if isinstance(spawn_tool, SpawnTool):
+            spawn_tool.set_context(msg.channel, msg.chat_id)
+
+        cron_tool = self.tools.get("cron")
+        if isinstance(cron_tool, CronTool):
+            cron_tool.set_context(msg.channel, msg.chat_id)
+
+        messages = self.context.build_messages(
+            history=session.get_history(),
+            current_message=msg.content,
+            media=msg.media if msg.media else None,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+        )
+
+        iteration = 0
+        final_content = None
+
+        while iteration < self.max_iterations:
+            iteration += 1
+
+            await on_event("thinking", {})
+
+            response = await self.provider.chat(
+                messages=messages,
+                tools=self.tools.get_definitions(),
+                model=self.model,
+            )
+
+            if response.has_tool_calls:
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                messages = self.context.add_assistant_message(
+                    messages, response.content, tool_call_dicts
+                )
+
+                for tool_call in response.tool_calls:
+                    await on_event("tool_call", {
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "args": tool_call.arguments,
+                    })
+
+                    result = await self.tools.execute(
+                        tool_call.name, tool_call.arguments
+                    )
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
+
+                    await on_event("tool_result", {
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "result": result,
+                    })
+            else:
+                final_content = response.content
+                break
+
+        if final_content is None:
+            final_content = "I've completed processing but have no response to give."
+
+        await on_event("text", {"content": final_content})
+
+        # Save to session
+        session.add_message("user", content)
+        session.add_message("assistant", final_content)
+        self.sessions.save(session)
+
+        return final_content

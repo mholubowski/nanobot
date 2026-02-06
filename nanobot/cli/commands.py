@@ -278,6 +278,76 @@ def gateway(
 
 
 # ============================================================================
+# Web UI
+# ============================================================================
+
+
+@app.command()
+def ui(
+    port: int = typer.Option(18790, "--port", "-p", help="Server port"),
+    dev: bool = typer.Option(False, "--dev", help="Run alongside Vite dev server"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Launch the nanobot web UI."""
+    from nanobot.config.loader import load_config
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+    from nanobot.agent.loop import AgentLoop
+
+    try:
+        import uvicorn
+        from nanobot.web.server import create_app
+    except ImportError:
+        console.print("[red]Error: Web dependencies not installed.[/red]")
+        console.print("Install them with: [cyan]pip install nanobot-ai\\[web][/cyan]")
+        raise typer.Exit(1)
+
+    if verbose:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+
+    config = load_config()
+
+    api_key = config.get_api_key()
+    api_base = config.get_api_base()
+    model = config.agents.defaults.model
+    is_bedrock = model.startswith("bedrock/")
+
+    if not api_key and not is_bedrock:
+        console.print("[red]Error: No API key configured.[/red]")
+        raise typer.Exit(1)
+
+    bus = MessageBus()
+    provider = LiteLLMProvider(
+        api_key=api_key,
+        api_base=api_base,
+        default_model=model,
+    )
+
+    agent = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+    )
+
+    fastapi_app = create_app(agent)
+
+    url = f"http://localhost:{port}"
+    if dev:
+        console.print(f"{__logo__} Starting nanobot API on {url}")
+        console.print(f"  Frontend: run [cyan]npm run dev[/cyan] in the ui/ directory")
+    else:
+        console.print(f"{__logo__} Starting nanobot UI on {url}")
+
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="warning")
+
+
+# ============================================================================
 # Agent Commands
 # ============================================================================
 
