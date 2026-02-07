@@ -28,6 +28,49 @@ List contents of a directory.
 list_dir(path: str) -> str
 ```
 
+## Code Search
+
+### search
+Search for a regex pattern across files using ripgrep. Returns matching lines with file paths, line numbers, and surrounding context. **Prefer this over `exec` with `grep`** — it's faster, returns better output, and has a higher output limit (30k chars vs 10k).
+```
+search(pattern: str, path: str = None, file_type: str = None, context_lines: int = 3, files_only: bool = False) -> str
+```
+
+**Parameters:**
+- `pattern` — Regex pattern (e.g. `"match_request.*status"`, `"def create"`, `"class MatchRequest"`)
+- `path` — Directory or file to search in (defaults to workspace root)
+- `file_type` — Filter by type: `rb`, `py`, `ts`, `tsx`, `js`, `json`, `yml`, `md`, etc.
+- `context_lines` — Lines of context around each match (default: 3)
+- `files_only` — If true, return only file paths that match (no content). Great for discovery — see ALL files related to a topic before diving into any of them.
+
+**Examples:**
+```
+# Discovery: find ALL files that mention match_request
+search(pattern="match_request", file_type="rb", files_only=true)
+
+# Detailed: search with context
+search(pattern="class MatchRequest", file_type="rb")
+search(pattern="def perform", path="/Users/mike/Desktop/Village/village-web/app/jobs")
+search(pattern="accepted_start_time", file_type="rb", context_lines=5)
+```
+
+### find_files
+Find files by name/glob pattern. Useful for discovering relevant files before reading them.
+```
+find_files(pattern: str, path: str = None) -> str
+```
+
+**Parameters:**
+- `pattern` — Glob pattern (e.g. `"**/match_request*.rb"`, `"**/*service*.rb"`, `"*.yml"`)
+- `path` — Directory to search in (defaults to workspace root)
+
+**Examples:**
+```
+find_files(pattern="**/match_request*.rb")
+find_files(pattern="**/*_service.rb", path="/Users/mike/Desktop/Village/village-web/app/services")
+find_files(pattern="**/recurring.yml")
+```
+
 ## Shell Execution
 
 ### exec

@@ -57,6 +57,12 @@ def create_app(agent: AgentLoop) -> FastAPI:
         if not user_message:
             return JSONResponse({"error": "No message provided"}, status_code=400)
 
+        # Use session_key from request, default to "web:default"
+        session_key = body.get("session_key", "web:default")
+        # Ensure web sessions are prefixed
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
         # Async queue to shuttle events from the agent callback to the SSE generator
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
@@ -68,7 +74,7 @@ def create_app(agent: AgentLoop) -> FastAPI:
                 await agent.process_with_events(
                     content=user_message,
                     on_event=on_event,
-                    session_key="web:default",
+                    session_key=session_key,
                 )
             except Exception as exc:
                 await queue.put({
@@ -101,6 +107,76 @@ def create_app(agent: AgentLoop) -> FastAPI:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ------------------------------------------------------------------
+    # GET /api/sessions — list web sessions
+    # ------------------------------------------------------------------
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        all_sessions = agent.sessions.list_sessions()
+        # Filter to web sessions and enrich with preview
+        results = []
+        for s in all_sessions:
+            key = s.get("key", "")
+            if not key.startswith("web"):
+                continue
+            # Load last user message as preview
+            preview = ""
+            path = s.get("path")
+            if path:
+                try:
+                    with open(path) as f:
+                        lines = f.readlines()
+                    # Find the first user message for a title
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            if data.get("role") == "user" and data.get("content"):
+                                preview = data["content"][:100]
+                                break
+                        except json.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+            results.append({
+                "key": key,
+                "preview": preview or "New conversation",
+                "updated_at": s.get("updated_at", ""),
+            })
+        return results
+
+    # ------------------------------------------------------------------
+    # GET /api/sessions/{key}/messages — load session history
+    # ------------------------------------------------------------------
+
+    @app.get("/api/sessions/{key:path}/messages")
+    async def get_session_messages(key: str):
+        session = agent.sessions.get_or_create(key)
+        messages = []
+        for m in session.messages:
+            if m.get("_type") == "metadata":
+                continue
+            messages.append({
+                "role": m.get("role", ""),
+                "content": m.get("content", ""),
+                "timestamp": m.get("timestamp", ""),
+            })
+        return messages
+
+    # ------------------------------------------------------------------
+    # DELETE /api/sessions/{key} — delete a session
+    # ------------------------------------------------------------------
+
+    @app.delete("/api/sessions/{key:path}")
+    async def delete_session(key: str):
+        deleted = agent.sessions.delete(key)
+        if deleted:
+            return {"status": "deleted"}
+        return JSONResponse({"error": "Session not found"}, status_code=404)
 
     # ------------------------------------------------------------------
     # GET /api/health

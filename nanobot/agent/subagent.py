@@ -14,6 +14,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.search import SearchTool, FindFilesTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
 
@@ -107,6 +108,8 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
+            tools.register(SearchTool(workspace=self.workspace))
+            tools.register(FindFilesTool(workspace=self.workspace))
             tools.register(WebSearchTool(api_key=self.brave_api_key))
             tools.register(WebFetchTool())
             

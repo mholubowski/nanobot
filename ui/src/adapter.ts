@@ -8,17 +8,30 @@ export type AgentEvent =
   | { type: "text"; content: string }
   | { type: "error"; message: string };
 
+export type SessionInfo = {
+  key: string;
+  preview: string;
+  updated_at: string;
+};
+
+export type HistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+};
+
 /**
  * Send a message to the nanobot backend and stream SSE events.
  */
 export async function* streamChat(
   message: string,
+  sessionKey: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AgentEvent> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, session_key: sessionKey }),
     signal,
   });
 
@@ -56,4 +69,32 @@ export async function* streamChat(
       }
     }
   }
+}
+
+/**
+ * Fetch the list of web sessions.
+ */
+export async function fetchSessions(): Promise<SessionInfo[]> {
+  const res = await fetch("/api/sessions");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/**
+ * Fetch message history for a session.
+ */
+export async function fetchMessages(key: string): Promise<HistoryMessage[]> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(key)}/messages`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/**
+ * Delete a session.
+ */
+export async function deleteSession(key: string): Promise<boolean> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+  return res.ok;
 }

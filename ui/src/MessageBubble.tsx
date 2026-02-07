@@ -1,6 +1,7 @@
 import { type Message } from "./App";
 import { ToolCallCard } from "./ToolCallCard";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { User, Loader2 } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
@@ -51,7 +52,7 @@ export function MessageBubble({ message }: { message: Message }) {
             {/* Text response */}
             {message.content && (
               <div className="prose prose-sm prose-invert prose-zinc max-w-none text-sm text-zinc-200">
-                <Markdown>{message.content}</Markdown>
+                <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
               </div>
             )}
           </>

@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Pencil,
   Search,
+  FileSearch,
   Globe,
   Send,
   Clock,
@@ -21,6 +22,8 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   write_file: <Pencil className="size-3.5" />,
   edit_file: <Pencil className="size-3.5" />,
   list_dir: <FolderOpen className="size-3.5" />,
+  search: <Search className="size-3.5" />,
+  find_files: <FileSearch className="size-3.5" />,
   web_search: <Search className="size-3.5" />,
   web_fetch: <Globe className="size-3.5" />,
   message: <Send className="size-3.5" />,
@@ -38,6 +41,10 @@ function getSummary(name: string, args: Record<string, unknown>): string {
     case "edit_file":
     case "list_dir":
       return str("path");
+    case "search":
+      return str("pattern");
+    case "find_files":
+      return str("pattern");
     case "web_search":
       return str("query");
     case "web_fetch":

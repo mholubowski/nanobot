@@ -14,6 +14,7 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.search import SearchTool, FindFilesTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
@@ -89,6 +90,10 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
+        
+        # Search tools
+        self.tools.register(SearchTool(workspace=self.workspace))
+        self.tools.register(FindFilesTool(workspace=self.workspace))
         
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))

@@ -27,6 +27,13 @@ class SkillsLoader:
         """
         List all available skills.
         
+        Supports both flat and grouped skill directories:
+          - skills/weather/SKILL.md        -> skill name: "weather"
+          - skills/village/platform/SKILL.md -> skill name: "village/platform"
+        
+        A directory is treated as a group if it has no SKILL.md of its own
+        but contains subdirectories that do.
+        
         Args:
             filter_unavailable: If True, filter out skills with unmet requirements.
         
@@ -37,24 +44,54 @@ class SkillsLoader:
         
         # Workspace skills (highest priority)
         if self.workspace_skills.exists():
-            for skill_dir in self.workspace_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists():
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
+            self._collect_skills(self.workspace_skills, "workspace", skills)
         
         # Built-in skills
         if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+            self._collect_skills(self.builtin_skills, "builtin", skills)
         
         # Filter by requirements
         if filter_unavailable:
             return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]
         return skills
+    
+    def _collect_skills(
+        self,
+        skills_dir: Path,
+        source: str,
+        skills: list[dict[str, str]],
+    ) -> None:
+        """
+        Scan a skills directory for skill definitions, supporting one level of grouping.
+        
+        - If skills_dir/foo/SKILL.md exists -> skill "foo"
+        - If skills_dir/group/bar/SKILL.md exists (and group has no SKILL.md) -> skill "group/bar"
+        
+        Skips skills whose name already exists in the list (workspace overrides builtin).
+        """
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            
+            skill_file = entry / "SKILL.md"
+            if skill_file.exists():
+                # Direct skill (e.g. skills/weather/SKILL.md)
+                if not any(s["name"] == entry.name for s in skills):
+                    skills.append({"name": entry.name, "path": str(skill_file), "source": source})
+            else:
+                # Check for grouped skills (e.g. skills/village/platform/SKILL.md)
+                for sub_entry in sorted(entry.iterdir()):
+                    if not sub_entry.is_dir():
+                        continue
+                    sub_skill_file = sub_entry / "SKILL.md"
+                    if sub_skill_file.exists():
+                        group_name = f"{entry.name}/{sub_entry.name}"
+                        if not any(s["name"] == group_name for s in skills):
+                            skills.append({
+                                "name": group_name,
+                                "path": str(sub_skill_file),
+                                "source": source,
+                            })
     
     def load_skill(self, name: str) -> str | None:
         """
