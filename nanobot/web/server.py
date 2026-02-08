@@ -179,6 +179,46 @@ def create_app(agent: AgentLoop) -> FastAPI:
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
     # ------------------------------------------------------------------
+    # GET /api/skills — list all skills with metadata
+    # ------------------------------------------------------------------
+
+    @app.get("/api/skills")
+    async def list_skills():
+        skills_loader = agent.context.skills
+        all_skills = skills_loader.list_skills(filter_unavailable=False)
+        results = []
+        for s in all_skills:
+            meta = skills_loader.get_skill_metadata(s["name"]) or {}
+            # Parse nanobot-specific metadata for emoji
+            nanobot_meta = skills_loader._parse_nanobot_metadata(meta.get("metadata", ""))
+            emoji = nanobot_meta.get("emoji", "")
+            available = skills_loader._check_requirements(nanobot_meta)
+            always = meta.get("always", "false").lower() == "true" if isinstance(meta.get("always"), str) else bool(meta.get("always"))
+            results.append({
+                "name": s["name"],
+                "description": meta.get("description", s["name"]),
+                "emoji": emoji,
+                "source": s["source"],
+                "always": always,
+                "available": available,
+            })
+        return results
+
+    # ------------------------------------------------------------------
+    # GET /api/skills/{name}/content — full skill markdown content
+    # ------------------------------------------------------------------
+
+    @app.get("/api/skills/{name:path}/content")
+    async def get_skill_content(name: str):
+        skills_loader = agent.context.skills
+        content = skills_loader.load_skill(name)
+        if content is None:
+            return JSONResponse({"error": "Skill not found"}, status_code=404)
+        # Strip frontmatter for cleaner display
+        stripped = skills_loader._strip_frontmatter(content)
+        return {"name": name, "content": stripped}
+
+    # ------------------------------------------------------------------
     # GET /api/health
     # ------------------------------------------------------------------
 

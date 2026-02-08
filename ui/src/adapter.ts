@@ -98,3 +98,39 @@ export async function deleteSession(key: string): Promise<boolean> {
   });
   return res.ok;
 }
+
+// ------------------------------------------------------------------
+// Skills
+// ------------------------------------------------------------------
+
+export type SkillInfo = {
+  name: string;
+  description: string;
+  emoji: string;
+  source: string;
+  always: boolean;
+  available: boolean;
+};
+
+export type SkillContent = {
+  name: string;
+  content: string;
+};
+
+/**
+ * Fetch the list of all skills.
+ */
+export async function fetchSkills(): Promise<SkillInfo[]> {
+  const res = await fetch("/api/skills");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/**
+ * Fetch the full markdown content of a skill.
+ */
+export async function fetchSkillContent(name: string): Promise<SkillContent | null> {
+  const res = await fetch(`/api/skills/${encodeURIComponent(name)}/content`);
+  if (!res.ok) return null;
+  return res.json();
+}

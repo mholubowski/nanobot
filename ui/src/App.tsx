@@ -3,11 +3,14 @@ import {
   streamChat,
   fetchSessions,
   fetchMessages,
+  fetchSkills,
   deleteSession as apiDeleteSession,
   type SessionInfo,
+  type SkillInfo,
 } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
 import { Sidebar } from "./Sidebar";
+import { SkillPanel } from "./SkillPanel";
 import { Send } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
@@ -41,6 +44,8 @@ function getInitialKey(): string {
 export default function App() {
   const [sessionKey, setSessionKey] = useState(getInitialKey);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -62,6 +67,8 @@ export default function App() {
 
   useEffect(() => {
     refreshSessions();
+    // Load skills once on mount
+    fetchSkills().then(setSkills);
   }, [refreshSessions]);
 
   // Load message history when session key changes
@@ -202,13 +209,24 @@ export default function App() {
       {/* Sidebar */}
       <Sidebar
         sessions={sessions}
+        skills={skills}
         activeKey={sessionKey}
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onSelectSkill={(name) => setActiveSkill(name)}
       />
 
-      {/* Main chat area */}
+      {/* Skill detail panel — replaces chat when a skill is selected */}
+      {activeSkill ? (
+        <div className="flex flex-col flex-1 min-w-0">
+          <SkillPanel
+            skillName={activeSkill}
+            onClose={() => setActiveSkill(null)}
+          />
+        </div>
+      ) : (
+      /* Main chat area */
       <div className="flex flex-col flex-1 min-w-0">
         {/* Header */}
         <header className="flex items-center gap-2.5 px-4 py-3 border-b border-zinc-800 bg-zinc-900">
@@ -263,6 +281,7 @@ export default function App() {
           </form>
         </div>
       </div>
+      )}
     </div>
   );
 }

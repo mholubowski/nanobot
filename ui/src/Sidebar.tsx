@@ -1,30 +1,38 @@
 import { useState } from "react";
-import { type SessionInfo } from "./adapter";
+import { type SessionInfo, type SkillInfo } from "./adapter";
 import {
   Plus,
   MessageSquare,
   X,
   PanelLeftClose,
   PanelLeft,
+  ChevronDown,
+  ChevronRight,
+  Sparkles,
 } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
 type Props = {
   sessions: SessionInfo[];
+  skills: SkillInfo[];
   activeKey: string;
   onNewChat: () => void;
   onSelectSession: (key: string) => void;
   onDeleteSession: (key: string) => void;
+  onSelectSkill: (name: string) => void;
 };
 
 export function Sidebar({
   sessions,
+  skills,
   activeKey,
   onNewChat,
   onSelectSession,
   onDeleteSession,
+  onSelectSkill,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
 
   if (collapsed) {
     return (
@@ -107,6 +115,52 @@ export function Sidebar({
           <p className="text-xs text-zinc-600 text-center py-4">
             No conversations yet
           </p>
+        )}
+      </div>
+
+      {/* Skills section */}
+      <div className="border-t border-zinc-800">
+        <button
+          onClick={() => setSkillsOpen(!skillsOpen)}
+          className="flex items-center gap-2 w-full px-3 py-2.5 text-xs font-semibold text-zinc-400 uppercase tracking-wider hover:text-zinc-300 transition-colors"
+        >
+          <Sparkles className="size-3.5" />
+          <span className="flex-1 text-left">Skills</span>
+          <span className="text-[10px] font-normal normal-case text-zinc-600">
+            {skills.length}
+          </span>
+          {skillsOpen ? (
+            <ChevronDown className="size-3" />
+          ) : (
+            <ChevronRight className="size-3" />
+          )}
+        </button>
+        {skillsOpen && (
+          <div className="px-2 pb-2 space-y-0.5 max-h-52 overflow-y-auto">
+            {skills.map((skill) => (
+              <button
+                key={skill.name}
+                onClick={() => onSelectSkill(skill.name)}
+                className="flex items-center gap-2 w-full rounded-lg px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200 transition-colors text-left"
+                title={skill.description}
+              >
+                <span className="text-base leading-none shrink-0 w-5 text-center">
+                  {skill.emoji || "📦"}
+                </span>
+                <span className="truncate flex-1">{skill.name}</span>
+                {skill.always && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-village/20 text-village shrink-0">
+                    auto
+                  </span>
+                )}
+                {!skill.available && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 shrink-0">
+                    n/a
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
     </div>
