@@ -42,7 +42,10 @@ export function useVoiceSession() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const playbackQueueRef = useRef<Int16Array[]>([]);
+  const pendingChunksRef = useRef<Int16Array[]>([]);
+  const pendingSamplesRef = useRef(0);
   const isPlayingRef = useRef(false);
+  const nextPlayTimeRef = useRef(0);
   const aliveRef = useRef(false);
   const abortRef = useRef(false);
   const cancelledToolIdsRef = useRef<Set<string>>(new Set());
@@ -60,12 +63,13 @@ export function useVoiceSession() {
     [],
   );
 
-  // ---- Audio playback (24kHz output) ----
+  // ---- Audio playback (24kHz data → system sample rate) ----
 
   const playNextChunk = useCallback(() => {
     const ctx = playbackCtxRef.current;
     if (!ctx || playbackQueueRef.current.length === 0) {
       isPlayingRef.current = false;
+      nextPlayTimeRef.current = 0;
       return;
     }
 
@@ -76,14 +80,42 @@ export function useVoiceSession() {
       float32[i] = samples[i] / 32768;
     }
 
+    // Create buffer at 24kHz — Web Audio resamples to the context's native rate
     const buffer = ctx.createBuffer(1, float32.length, 24000);
     buffer.copyToChannel(float32, 0);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
+
+    // Schedule at exact time for gapless playback (no clicks between chunks)
+    const startTime = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+    source.start(startTime);
+    nextPlayTimeRef.current = startTime + buffer.duration;
+
     source.onended = () => playNextChunk();
-    source.start();
   }, []);
+
+  // Minimum samples to accumulate before queueing for playback (~100ms at 24kHz)
+  const MIN_BUFFER_SAMPLES = 2400;
+
+  const flushPendingAudio = useCallback(() => {
+    const chunks = pendingChunksRef.current;
+    const total = pendingSamplesRef.current;
+    if (total === 0) return;
+
+    // Concatenate pending chunks into one buffer
+    const combined = new Int16Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    pendingChunksRef.current = [];
+    pendingSamplesRef.current = 0;
+
+    playbackQueueRef.current.push(combined);
+    if (!isPlayingRef.current) playNextChunk();
+  }, [playNextChunk]);
 
   const enqueueAudio = useCallback(
     (base64Data: string) => {
@@ -92,13 +124,19 @@ export function useVoiceSession() {
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        playbackQueueRef.current.push(int16);
-        if (!isPlayingRef.current) playNextChunk();
+
+        // Accumulate small chunks into larger buffers
+        pendingChunksRef.current.push(int16);
+        pendingSamplesRef.current += int16.length;
+
+        if (pendingSamplesRef.current >= MIN_BUFFER_SAMPLES) {
+          flushPendingAudio();
+        }
       } catch {
         // skip malformed audio
       }
     },
-    [playNextChunk],
+    [flushPendingAudio],
   );
 
   // ---- Tool call handling ----
@@ -208,10 +246,13 @@ export function useVoiceSession() {
           return;
         }
 
-        // Interruption — clear playback queue
+        // Interruption — clear all audio
         if (msg.serverContent && "interrupted" in msg.serverContent && (msg.serverContent as any).interrupted) {
+          pendingChunksRef.current = [];
+          pendingSamplesRef.current = 0;
           playbackQueueRef.current.length = 0;
           isPlayingRef.current = false;
+          nextPlayTimeRef.current = 0;
           return;
         }
 
@@ -238,15 +279,16 @@ export function useVoiceSession() {
           }
         }
 
-        // Turn complete
+        // Turn complete — flush any remaining audio
         if (msg.serverContent?.turnComplete) {
+          flushPendingAudio();
           setState((prev) => (prev === "processing" ? prev : "listening"));
         }
       } catch (err) {
         console.error("[Voice] Message handler error:", err);
       }
     },
-    [executeTool, enqueueAudio],
+    [executeTool, enqueueAudio, flushPendingAudio],
   );
 
   // ---- Connect ----
@@ -326,8 +368,10 @@ export function useVoiceSession() {
       sessionRef.current = session;
       console.log("[Voice] Session alive");
 
-      // 3. Audio contexts
-      playbackCtxRef.current = new AudioContext({ sampleRate: 24000 });
+      // 3. Audio context — use default system rate (48kHz typically)
+      // The createBuffer(1, length, 24000) tells Web Audio the data is 24kHz
+      // and it resamples to native rate internally (high quality)
+      playbackCtxRef.current = new AudioContext();
 
       // 4. Mic access
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -414,8 +458,11 @@ export function useVoiceSession() {
       sessionRef.current = null;
     }
 
+    pendingChunksRef.current = [];
+    pendingSamplesRef.current = 0;
     playbackQueueRef.current.length = 0;
     isPlayingRef.current = false;
+    nextPlayTimeRef.current = 0;
     cancelledToolIdsRef.current.clear();
     setToolStatus("");
     setError("");
