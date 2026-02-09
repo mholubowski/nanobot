@@ -335,7 +335,8 @@ def ui(
         restrict_to_workspace=config.tools.restrict_to_workspace,
     )
 
-    fastapi_app = create_app(agent)
+    gemini_key = config.providers.gemini.api_key or ""
+    fastapi_app = create_app(agent, gemini_api_key=gemini_key)
 
     url = f"http://localhost:{port}"
     if dev:

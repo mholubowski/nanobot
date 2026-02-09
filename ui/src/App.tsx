@@ -11,7 +11,8 @@ import {
 import { MessageBubble } from "./MessageBubble";
 import { Sidebar } from "./Sidebar";
 import { SkillPanel } from "./SkillPanel";
-import { Send } from "lucide-react";
+import { VoiceMode } from "./VoiceMode";
+import { Send, Mic } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
 export type ToolCall = {
@@ -46,6 +47,7 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -278,10 +280,22 @@ export default function App() {
             >
               <Send className="size-4" />
             </button>
+            <button
+              type="button"
+              onClick={() => setVoiceOpen(true)}
+              disabled={isLoading}
+              className="rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 p-2.5 text-zinc-400 hover:text-zinc-200 transition-colors"
+              title="Voice mode"
+            >
+              <Mic className="size-4" />
+            </button>
           </form>
         </div>
       </div>
       )}
+
+      {/* Voice mode overlay */}
+      {voiceOpen && <VoiceMode onClose={() => setVoiceOpen(false)} />}
     </div>
   );
 }

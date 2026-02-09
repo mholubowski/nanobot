@@ -11,11 +11,12 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.web.voice import router as voice_router, init as voice_init
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(agent: AgentLoop) -> FastAPI:
+def create_app(agent: AgentLoop, gemini_api_key: str = "") -> FastAPI:
     """Create the FastAPI application.
 
     Args:
@@ -33,6 +34,10 @@ def create_app(agent: AgentLoop) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Voice mode endpoints (Gemini Live API)
+    voice_init(agent, gemini_api_key)
+    app.include_router(voice_router)
 
     # ------------------------------------------------------------------
     # POST /api/chat — SSE streaming endpoint
