@@ -1,7 +1,11 @@
-"""Voice mode endpoints for Gemini Live API integration."""
+"""Voice mode endpoints for Gemini Live API integration.
+
+Architecture: The Gemini voice model is a thin conversational layer.
+All real work (DB queries, codebase search, matchmaking, etc.) is delegated
+to Nanobot's full AgentLoop via a single `ask_nanobot` tool.
+"""
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -20,11 +24,78 @@ _gemini_api_key: str = ""
 
 VOICE_MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
 
-VOICE_PREAMBLE = """VOICE MODE: You are speaking with the user via a live voice call.
-Keep responses concise and conversational — speak naturally as you would on a phone call.
-Do not use markdown, code blocks, bullet points, or any formatting that doesn't work in speech.
-When tools take a while to run, let the user know you're working on it.
-Speak numbers and technical terms clearly. Summarize long tool outputs rather than reading them verbatim."""
+# The single tool exposed to the voice model
+VOICE_TOOLS = [
+    {
+        "functionDeclarations": [
+            {
+                "name": "ask_nanobot",
+                "description": (
+                    "Ask the Nanobot agent to look something up, query data, "
+                    "search code, run commands, find practitioners, or perform "
+                    "any task that requires tools. Nanobot has access to the "
+                    "Village database, codebase, and AI matchmaking service. "
+                    "Pass the user's request as a natural language question. "
+                    "Nanobot will figure out how to answer it."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question or task to delegate to Nanobot",
+                        }
+                    },
+                    "required": ["question"],
+                },
+            }
+        ]
+    }
+]
+
+VOICE_SYSTEM_PROMPT = """\
+You are the Village voice assistant. You help families find healthcare \
+practitioners and answer questions about the Village platform.
+
+You speak naturally and conversationally — this is a voice call, not a text chat. \
+Keep responses concise. Do not use markdown, bullet points, or any formatting \
+that doesn't work in speech.
+
+IMPORTANT: You have ONE tool called ask_nanobot. Use it whenever the user \
+asks anything that requires looking up data, querying the database, \
+searching code, finding practitioners, or any task that isn't pure conversation. \
+Pass the user's question as natural language — Nanobot will handle the rest.
+
+Examples of when to use ask_nanobot:
+- "How many practitioners are in the database?" → use ask_nanobot
+- "Who is the CEO of Village?" → use ask_nanobot
+- "What's the status of match request 123?" → use ask_nanobot
+- "How does authentication work in the codebase?" → use ask_nanobot
+
+Examples of when NOT to use it:
+- "Thanks!" → just respond naturally
+- "Can you repeat that?" → just respond
+- "Hello" / "Goodbye" → just respond
+- General knowledge questions unrelated to Village → just respond
+
+FINDING A PRACTITIONER: When a user wants to find a therapist or provider, \
+gather the following information conversationally BEFORE calling ask_nanobot:
+1. What type of care? (speech therapy, occupational therapy, ABA, etc.)
+2. Child's age
+3. Zip code or city
+4. Insurance provider (or cash pay)
+5. Any specific needs or preferences (optional but helpful)
+Once you have at least items 1-4, call ask_nanobot with a detailed description \
+combining everything, for example: "Find a speech therapist near 90045 for a \
+5 year old with Anthem Blue Cross who needs help with articulation."
+
+When ask_nanobot is working, let the user know — it may take 10-30 seconds \
+for complex queries. Say something like "Let me look that up" or "Give me a moment."
+
+When you get results back, summarize them naturally for voice. \
+Don't read raw JSON or long text — speak like a helpful person on the phone. \
+For practitioner matches, mention the top recommendation by name, why they're \
+a good fit, and whether they accept the family's insurance."""
 
 
 def init(agent: AgentLoop, gemini_api_key: str) -> None:
@@ -34,170 +105,55 @@ def init(agent: AgentLoop, gemini_api_key: str) -> None:
     _gemini_api_key = gemini_api_key
 
 
-def _convert_tools_to_gemini(
-    openai_tools: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Convert OpenAI-format tool schemas to Gemini function declarations.
-
-    OpenAI: [{ type: "function", function: { name, description, parameters } }]
-    Gemini: [{ functionDeclarations: [{ name, description, parameters }] }]
-    """
-    declarations = []
-    for tool in openai_tools:
-        func = tool.get("function", {})
-        decl: dict[str, Any] = {
-            "name": func.get("name", ""),
-            "description": func.get("description", ""),
-        }
-        params = func.get("parameters")
-        if params:
-            # Gemini doesn't support JSON Schema additionalProperties, strip it
-            cleaned = _clean_schema_for_gemini(params)
-            decl["parameters"] = cleaned
-        declarations.append(decl)
-    return [{"functionDeclarations": declarations}] if declarations else []
-
-
-def _clean_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
-    """Remove JSON Schema fields that Gemini's Live API doesn't support.
-
-    Gemini only supports a subset of JSON Schema: type, description, properties,
-    required, items, enum. Everything else must be stripped.
-    """
-    ALLOWED_KEYS = {
-        "type",
-        "description",
-        "properties",
-        "required",
-        "items",
-        "enum",
-        "format",
-        "nullable",
-    }
-    cleaned = {}
-    for k, v in schema.items():
-        if k not in ALLOWED_KEYS:
-            continue
-        if k == "properties" and isinstance(v, dict):
-            cleaned[k] = {pk: _clean_schema_for_gemini(pv) for pk, pv in v.items()}
-        elif k == "items" and isinstance(v, dict):
-            cleaned[k] = _clean_schema_for_gemini(v)
-        else:
-            cleaned[k] = v
-    return cleaned
-
-
 @router.post("/token")
 async def get_voice_token(request: Request):
-    """Generate an ephemeral token and session config for Gemini Live API.
+    """Generate a token and session config for Gemini Live API.
 
-    Returns the token, model, system instruction (with full Nanobot context),
-    and all tool definitions so the browser can connect directly.
-
-    Query params:
-        tools: "true" (default) or "false" — include tools in config
-        model: override model name (for testing)
+    Returns the token, model, system instruction, and the single ask_nanobot
+    tool definition.
     """
     if not _gemini_api_key:
         return JSONResponse(
-            {
-                "error": "Gemini API key not configured. Set providers.gemini.apiKey in ~/.nanobot/config.json"
-            },
+            {"error": "Gemini API key not configured. Set providers.gemini.apiKey in ~/.nanobot/config.json"},
             status_code=500,
         )
 
     if not _agent:
         return JSONResponse({"error": "Agent not initialized"}, status_code=500)
 
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
+    model = VOICE_MODEL
+    logger.info(f"[Voice] Preparing session: model={model}, 1 tool (ask_nanobot)")
 
-    include_tools = body.get("tools", True)
-    model_override = body.get("model", None)
-
-    # Build system prompt from Nanobot's context builder (includes skills, memory, etc.)
-    system_prompt = _agent.context.build_system_prompt()
-    full_prompt = f"{VOICE_PREAMBLE}\n\n{system_prompt}"
-
-    # Get all tool definitions and convert to Gemini format
-    gemini_tools: list[dict[str, Any]] = []
-    if include_tools:
-        openai_tools = _agent.tools.get_definitions()
-        gemini_tools = _convert_tools_to_gemini(openai_tools)
-
-    model = model_override or VOICE_MODEL
-    tool_names = [
-        d["name"] for t in gemini_tools for d in t.get("functionDeclarations", [])
-    ]
-    logger.info(
-        f"[Voice] Preparing session: model={model}, {len(tool_names)} tools ({', '.join(tool_names)}), prompt length={len(full_prompt)}"
-    )
-    if gemini_tools:
-        logger.debug(f"[Voice] Tools JSON: {json.dumps(gemini_tools, indent=2)}")
-
-    # Generate ephemeral token using the Gemini REST API directly
-    # (avoids requiring the google-genai SDK as a dependency)
+    # Try ephemeral token, fall back to API key for dev
     try:
         import httpx
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1alpha/authTokens",
+                "https://generativelanguage.googleapis.com/v1alpha/authTokens",
                 params={"key": _gemini_api_key},
-                json={
-                    "uses": 1,
-                },
+                json={"uses": 1},
                 timeout=10.0,
             )
-            if resp.status_code != 200:
-                # Fall back to returning the API key directly for development
+            if resp.status_code == 200:
+                token_data = resp.json()
                 return {
-                    "token": _gemini_api_key,
-                    "tokenType": "apiKey",
+                    "token": token_data.get("name", ""),
+                    "tokenType": "ephemeral",
                     "model": model,
-                    "systemInstruction": full_prompt,
-                    "tools": gemini_tools,
+                    "systemInstruction": VOICE_SYSTEM_PROMPT,
+                    "tools": VOICE_TOOLS,
                 }
-            token_data = resp.json()
     except Exception:
-        # Fall back to API key for development
-        return {
-            "token": _gemini_api_key,
-            "tokenType": "apiKey",
-            "model": model,
-            "systemInstruction": full_prompt,
-            "tools": gemini_tools,
-        }
+        pass
 
+    # Fallback: return API key directly
     return {
-        "token": token_data.get("name", ""),
-        "tokenType": "ephemeral",
+        "token": _gemini_api_key,
+        "tokenType": "apiKey",
         "model": model,
-        "systemInstruction": full_prompt,
-        "tools": gemini_tools,
-    }
-
-
-@router.get("/debug")
-async def debug_voice_config():
-    """Return the voice session config for debugging (no token generation)."""
-    if not _agent:
-        return JSONResponse({"error": "Agent not initialized"}, status_code=500)
-
-    system_prompt = _agent.context.build_system_prompt()
-    full_prompt = f"{VOICE_PREAMBLE}\n\n{system_prompt}"
-    openai_tools = _agent.tools.get_definitions()
-    gemini_tools = _convert_tools_to_gemini(openai_tools)
-
-    return {
-        "model": VOICE_MODEL,
-        "promptLength": len(full_prompt),
-        "promptPreview": full_prompt[:500] + "...",
-        "toolCount": sum(len(t.get("functionDeclarations", [])) for t in gemini_tools),
-        "tools": gemini_tools,
+        "systemInstruction": VOICE_SYSTEM_PROMPT,
+        "tools": VOICE_TOOLS,
     }
 
 
@@ -205,7 +161,8 @@ async def debug_voice_config():
 async def execute_tool(request: Request):
     """Execute a tool call from the voice agent.
 
-    Accepts { name: string, args: object } and routes through Nanobot's ToolRegistry.
+    The only expected tool is `ask_nanobot`, which runs the question through
+    Nanobot's full AgentLoop (same brain as text chat).
     """
     if not _agent:
         return JSONResponse({"error": "Agent not initialized"}, status_code=500)
@@ -217,13 +174,30 @@ async def execute_tool(request: Request):
     if not tool_name:
         return JSONResponse({"error": "Missing tool name"}, status_code=400)
 
-    try:
-        result = await asyncio.wait_for(
-            _agent.tools.execute(tool_name, tool_args),
-            timeout=120.0,
-        )
-        return {"result": result}
-    except asyncio.TimeoutError:
-        return {"result": f"Error: Tool '{tool_name}' timed out after 120 seconds."}
-    except Exception as e:
-        return {"result": f"Error executing tool '{tool_name}': {str(e)}"}
+    if tool_name == "ask_nanobot":
+        question = tool_args.get("question", "")
+        if not question:
+            return {"result": "No question provided."}
+
+        logger.info(f"[Voice] ask_nanobot: {question[:200]}")
+
+        try:
+            result = await asyncio.wait_for(
+                _agent.process_direct(
+                    content=question,
+                    session_key="voice:current",
+                    channel="voice",
+                    chat_id="voice",
+                ),
+                timeout=120.0,
+            )
+            logger.info(f"[Voice] ask_nanobot result: {(result or '')[:200]}")
+            return {"result": result or "No answer."}
+        except asyncio.TimeoutError:
+            return {"result": "Sorry, that query took too long. Please try a simpler question."}
+        except Exception as e:
+            logger.error(f"[Voice] ask_nanobot error: {e}")
+            return {"result": f"Error: {str(e)}"}
+
+    # Fallback for any other tool name (shouldn't happen)
+    return {"result": f"Unknown tool: {tool_name}"}

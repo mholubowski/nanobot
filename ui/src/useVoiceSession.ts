@@ -10,6 +10,12 @@ export type VoiceState =
   | "processing"
   | "error";
 
+export type TranscriptEntry = {
+  type: "user" | "agent" | "tool" | "status";
+  text: string;
+  timestamp: number;
+};
+
 type VoiceConfig = {
   token: string;
   tokenType: "apiKey" | "ephemeral";
@@ -21,32 +27,43 @@ type VoiceConfig = {
 /**
  * Custom hook that manages a Gemini Live API voice session.
  *
- * Handles:
- * - Ephemeral token fetching from backend
- * - WebSocket connection to Gemini Live API
- * - Mic audio capture (16kHz 16-bit PCM mono)
- * - Audio playback (24kHz 16-bit PCM mono)
- * - Tool call forwarding to backend
+ * The voice model is a thin conversational layer — all real work is
+ * delegated to Nanobot via the single `ask_nanobot` tool.
  */
 export function useVoiceSession() {
   const [state, setState] = useState<VoiceState>("idle");
-  const [toolStatus, setToolStatus] = useState<string>("");
-  const [error, setError] = useState<string>("");
+  const [toolStatus, setToolStatus] = useState("");
+  const [error, setError] = useState("");
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
 
   const sessionRef = useRef<Session | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const micContextRef = useRef<AudioContext | null>(null);
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const playbackQueueRef = useRef<Int16Array[]>([]);
   const isPlayingRef = useRef(false);
+  const aliveRef = useRef(false);
   const abortRef = useRef(false);
-  const sessionAliveRef = useRef(false);
+  const cancelledToolIdsRef = useRef<Set<string>>(new Set());
+  const toolAbortRef = useRef<AbortController | null>(null);
 
-  // ---- Audio playback ----
+  // ---- Helpers ----
+
+  const addTranscript = useCallback(
+    (type: TranscriptEntry["type"], text: string) => {
+      setTranscript((prev) => [
+        ...prev,
+        { type, text, timestamp: Date.now() },
+      ]);
+    },
+    [],
+  );
+
+  // ---- Audio playback (24kHz output) ----
 
   const playNextChunk = useCallback(() => {
-    const ctx = audioContextRef.current;
+    const ctx = playbackCtxRef.current;
     if (!ctx || playbackQueueRef.current.length === 0) {
       isPlayingRef.current = false;
       return;
@@ -54,8 +71,6 @@ export function useVoiceSession() {
 
     isPlayingRef.current = true;
     const samples = playbackQueueRef.current.shift()!;
-
-    // Convert Int16 to Float32
     const float32 = new Float32Array(samples.length);
     for (let i = 0; i < samples.length; i++) {
       float32[i] = samples[i] / 32768;
@@ -63,7 +78,6 @@ export function useVoiceSession() {
 
     const buffer = ctx.createBuffer(1, float32.length, 24000);
     buffer.copyToChannel(float32, 0);
-
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
@@ -74,23 +88,14 @@ export function useVoiceSession() {
   const enqueueAudio = useCallback(
     (base64Data: string) => {
       try {
-        const binaryStr = atob(base64Data);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
-        }
-        const int16 = new Int16Array(
-          bytes.buffer,
-          bytes.byteOffset,
-          bytes.byteLength / 2,
-        );
+        const bin = atob(base64Data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
         playbackQueueRef.current.push(int16);
-
-        if (!isPlayingRef.current) {
-          playNextChunk();
-        }
-      } catch (err) {
-        console.error("[Voice] Error decoding audio:", err);
+        if (!isPlayingRef.current) playNextChunk();
+      } catch {
+        // skip malformed audio
       }
     },
     [playNextChunk],
@@ -98,71 +103,59 @@ export function useVoiceSession() {
 
   // ---- Tool call handling ----
 
-  const handleToolCall = useCallback(
-    async (msg: LiveServerMessage) => {
-      const functionCalls = msg.toolCall?.functionCalls;
-      if (!functionCalls || functionCalls.length === 0) {
-        console.warn("[Voice] toolCall received but no functionCalls:", msg.toolCall);
-        return;
-      }
-      if (!sessionRef.current) {
-        console.warn("[Voice] toolCall received but session is null");
-        return;
-      }
+  const executeTool = useCallback(
+    async (id: string, name: string, args: Record<string, unknown>) => {
+      if (!sessionRef.current || !aliveRef.current) return;
 
-      console.log("[Voice] Tool call received:", functionCalls.map(fc => fc.name));
+      console.log(`[Voice] Tool call: ${name}`, args);
       setState("processing");
+      setToolStatus(`Asking Nanobot...`);
+      addTranscript("tool", `Asking: ${(args.question as string) ?? name}`);
 
-      const responses: { id: string; name: string; response: Record<string, unknown> }[] = [];
+      const abortController = new AbortController();
+      toolAbortRef.current = abortController;
 
-      for (const fc of functionCalls) {
-        const name = fc.name ?? "unknown";
-        const id = fc.id ?? "";
-        console.log(`[Voice] Executing tool: ${name}`, fc.args);
-        setToolStatus(`Running ${name}...`);
+      let resultText = "No result";
 
-        try {
-          const res = await fetch("/api/voice/tool", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, args: fc.args ?? {} }),
-          });
+      try {
+        const res = await fetch("/api/voice/tool", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, args }),
+          signal: abortController.signal,
+        });
 
-          if (!res.ok) {
-            const errText = await res.text();
-            console.error(`[Voice] Tool API error (${res.status}):`, errText);
-            responses.push({
-              id,
-              name,
-              response: { result: `Error: HTTP ${res.status} - ${errText}` },
-            });
-            continue;
-          }
-
+        if (!res.ok) {
+          resultText = `Error: HTTP ${res.status}`;
+        } else {
           const data = await res.json();
-          console.log(`[Voice] Tool result for ${name}:`, (data.result ?? "").slice(0, 200));
-          responses.push({
-            id,
-            name,
-            response: { result: data.result ?? "No result" },
-          });
-        } catch (err) {
-          console.error(`[Voice] Tool fetch error for ${name}:`, err);
-          responses.push({
-            id,
-            name,
-            response: { result: `Error: ${err}` },
-          });
+          resultText = data.result ?? "No result";
         }
+      } catch (err: unknown) {
+        if ((err as Error).name === "AbortError") {
+          console.log(`[Voice] Tool call ${id} was aborted`);
+          return; // Don't send response for aborted calls
+        }
+        resultText = `Error: ${err}`;
+      } finally {
+        toolAbortRef.current = null;
+      }
+
+      // Check if this tool call was cancelled while we were running
+      if (cancelledToolIdsRef.current.has(id)) {
+        console.log(`[Voice] Tool call ${id} was cancelled, skipping response`);
+        cancelledToolIdsRef.current.delete(id);
+        return;
       }
 
       setToolStatus("");
+      console.log(`[Voice] Tool result (${resultText.length} chars):`, resultText.slice(0, 200));
+      addTranscript("agent", resultText);
 
-      // Send all tool responses back to Gemini
+      // Send result back to Gemini
       try {
-        console.log("[Voice] Sending tool responses:", responses.map(r => r.name));
         sessionRef.current.sendToolResponse({
-          functionResponses: responses,
+          functionResponses: [{ id, name, response: { result: resultText } }],
         });
         setState("listening");
       } catch (err) {
@@ -171,7 +164,7 @@ export function useVoiceSession() {
         setState("error");
       }
     },
-    [],
+    [addTranscript],
   );
 
   // ---- Message handler ----
@@ -179,83 +172,81 @@ export function useVoiceSession() {
   const handleMessage = useCallback(
     (msg: LiveServerMessage) => {
       try {
-        // Raw message log — summarize each message type
-        const msgKeys = Object.keys(msg).filter(k => (msg as any)[k] != null);
-        const summary: Record<string, unknown> = { keys: msgKeys };
-        if (msg.serverContent?.modelTurn?.parts) {
-          summary.parts = msg.serverContent.modelTurn.parts.map((p: any) => {
-            if (p.inlineData) return `audio(${(p.inlineData.data as string)?.length ?? 0} chars)`;
-            if (p.functionCall) return `functionCall(${p.functionCall.name})`;
-            if (p.text) return `text(${p.text.slice(0, 50)})`;
-            return Object.keys(p).join(",");
-          });
-        }
-        if (msg.serverContent?.turnComplete) summary.turnComplete = true;
-        if (msg.toolCall?.functionCalls) {
-          summary.toolCall = msg.toolCall.functionCalls.map((fc: any) => fc.name);
-        }
-        if (msg.toolCallCancellation) summary.cancelled = msg.toolCallCancellation.ids;
-        console.log("[Voice] MSG:", JSON.stringify(summary));
-
         // Setup complete
         if (msg.setupComplete) {
           console.log("[Voice] Setup complete");
           return;
         }
 
-        // Tool calls
-        if (msg.toolCall) {
-          // Fire and forget — errors handled inside handleToolCall
-          handleToolCall(msg).catch((err) => {
-            console.error("[Voice] Unhandled tool call error:", err);
-            setError(`Tool call failed: ${err}`);
-            setState("error");
-          });
+        // Top-level tool call
+        if (msg.toolCall?.functionCalls) {
+          for (const fc of msg.toolCall.functionCalls) {
+            executeTool(fc.id ?? "", fc.name ?? "unknown", fc.args ?? {}).catch(
+              (err) => {
+                console.error("[Voice] Tool call error:", err);
+                setError(`Tool call failed: ${err}`);
+                setState("error");
+              },
+            );
+          }
           return;
         }
 
         // Tool call cancellation
-        if (msg.toolCallCancellation) {
-          console.log("[Voice] Tool call cancelled:", msg.toolCallCancellation.ids);
+        if (msg.toolCallCancellation?.ids) {
+          console.log("[Voice] Tool calls cancelled:", msg.toolCallCancellation.ids);
+          for (const id of msg.toolCallCancellation.ids) {
+            cancelledToolIdsRef.current.add(id);
+          }
+          // Abort the in-flight fetch if any
+          if (toolAbortRef.current) {
+            toolAbortRef.current.abort();
+            toolAbortRef.current = null;
+          }
           setToolStatus("");
           setState("listening");
           return;
         }
 
         // Interruption — clear playback queue
-        if (
-          msg.serverContent &&
-          "interrupted" in msg.serverContent &&
-          (msg.serverContent as any).interrupted
-        ) {
-          console.log("[Voice] Interrupted — clearing playback");
+        if (msg.serverContent && "interrupted" in msg.serverContent && (msg.serverContent as any).interrupted) {
           playbackQueueRef.current.length = 0;
           isPlayingRef.current = false;
           return;
         }
 
-        // Audio data from model
+        // Server content (audio + possible embedded function calls)
         if (msg.serverContent?.modelTurn?.parts) {
           for (const part of msg.serverContent.modelTurn.parts) {
-            if (
-              part.inlineData &&
-              typeof part.inlineData.data === "string"
-            ) {
+            // Audio data
+            if (part.inlineData && typeof part.inlineData.data === "string") {
               setState("speaking");
               enqueueAudio(part.inlineData.data);
+            }
+
+            // Embedded function call (when model speaks then calls a tool in same turn)
+            if ((part as any).functionCall) {
+              const fc = (part as any).functionCall;
+              executeTool(fc.id ?? "", fc.name ?? "unknown", fc.args ?? {}).catch(
+                (err) => {
+                  console.error("[Voice] Embedded tool call error:", err);
+                  setError(`Tool call failed: ${err}`);
+                  setState("error");
+                },
+              );
             }
           }
         }
 
-        // Turn complete — back to listening
+        // Turn complete
         if (msg.serverContent?.turnComplete) {
-          setState("listening");
+          setState((prev) => (prev === "processing" ? prev : "listening"));
         }
       } catch (err) {
-        console.error("[Voice] Error in message handler:", err);
+        console.error("[Voice] Message handler error:", err);
       }
     },
-    [handleToolCall, enqueueAudio],
+    [executeTool, enqueueAudio],
   );
 
   // ---- Connect ----
@@ -265,117 +256,66 @@ export function useVoiceSession() {
 
     setState("connecting");
     setError("");
+    setTranscript([]);
     abortRef.current = false;
+    cancelledToolIdsRef.current.clear();
 
     try {
-      // 1. Get token + config from backend
-      console.log("[Voice] Fetching voice token...");
-      const configRes = await fetch("/api/voice/token", {
+      // 1. Get config from backend
+      console.log("[Voice] Fetching voice config...");
+      const res = await fetch("/api/voice/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tools: true }),
+        body: "{}",
       });
-      if (!configRes.ok) {
-        const errText = await configRes.text();
-        throw new Error(`Failed to get voice token: ${configRes.status} ${errText}`);
-      }
-      const config: VoiceConfig = await configRes.json();
-      const declCount = (config.tools ?? []).reduce(
-        (n: number, t: any) => n + (t.functionDeclarations?.length ?? 0),
-        0,
-      );
-      console.log("[Voice] Got config:", {
-        model: config.model,
-        tokenType: config.tokenType,
-        toolDeclCount: declCount,
-        promptLength: config.systemInstruction?.length ?? 0,
-      });
+      if (!res.ok) throw new Error(`Token request failed: ${res.status}`);
+      const config: VoiceConfig = await res.json();
+      console.log("[Voice] Config:", { model: config.model, tokenType: config.tokenType });
 
       if (abortRef.current) return;
 
-      // 2. Create Gemini client with the token
+      // 2. Connect to Gemini Live API
       const ai = new GoogleGenAI({ apiKey: config.token });
+      aliveRef.current = false;
 
-      // 3. Connect to Live API
-      // Try with tools first; if connection dies quickly, retry without tools
-      const connectToGemini = async (
-        useTools: boolean,
-      ): Promise<Session> => {
-        const toolsConfig = useTools && config.tools?.length
-          ? config.tools
-          : undefined;
-
-        console.log(
-          `[Voice] Connecting to Gemini Live API (tools=${useTools ? "yes" : "no"})...`,
-        );
-
-        sessionAliveRef.current = false;
-        let closeReason = "";
-
-        const session = await ai.live.connect({
-          model: config.model,
-          config: {
-            responseModalities: [Modality.AUDIO],
-            systemInstruction: config.systemInstruction,
-            ...(toolsConfig ? { tools: toolsConfig as any } : {}),
+      console.log("[Voice] Connecting to Gemini...");
+      const session = await ai.live.connect({
+        model: config.model,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction: config.systemInstruction,
+          tools: config.tools as any,
+        },
+        callbacks: {
+          onopen: () => {
+            console.log("[Voice] WebSocket connected");
+            aliveRef.current = true;
           },
-          callbacks: {
-            onopen: () => {
-              console.log("[Voice] WebSocket connected");
-              sessionAliveRef.current = true;
-            },
-            onmessage: handleMessage,
-            onerror: (e: ErrorEvent) => {
-              console.error("[Voice] WebSocket error:", e);
-              sessionAliveRef.current = false;
-              closeReason = e.message || "unknown error";
-            },
-            onclose: (e: CloseEvent) => {
-              console.log("[Voice] WebSocket closed:", e.code, e.reason);
-              const wasAlive = sessionAliveRef.current;
-              sessionAliveRef.current = false;
-              closeReason = e.reason || "";
-              // If session was established and running, update UI
-              if (wasAlive && sessionRef.current) {
-                if (e.reason) {
-                  setError(`Disconnected: ${e.reason}`);
-                  setState("error");
-                } else {
-                  setState("idle");
-                }
+          onmessage: handleMessage,
+          onerror: (e: ErrorEvent) => {
+            console.error("[Voice] WebSocket error:", e);
+            aliveRef.current = false;
+          },
+          onclose: (e: CloseEvent) => {
+            console.log("[Voice] WebSocket closed:", e.code, e.reason);
+            const wasAlive = aliveRef.current;
+            aliveRef.current = false;
+            if (wasAlive && sessionRef.current) {
+              if (e.reason) {
+                setError(`Disconnected: ${e.reason}`);
+                setState("error");
+              } else {
+                setState("idle");
               }
-            },
+            }
           },
-        });
+        },
+      });
 
-        // Wait to check if Gemini rejects the session immediately
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-
-        if (!sessionAliveRef.current) {
-          throw new Error(closeReason || "Session closed immediately");
-        }
-
-        return session;
-      };
-
-      let session: Session;
-      try {
-        session = await connectToGemini(true);
-        console.log("[Voice] Connected with tools");
-      } catch (err) {
-        console.warn(
-          `[Voice] Connection with tools failed: ${err}. Retrying without tools...`,
-        );
-        setToolStatus("Tools unavailable — connecting without tools...");
-        try {
-          session = await connectToGemini(false);
-          console.log("[Voice] Connected without tools (voice-only mode)");
-          setToolStatus("Voice-only mode (tools not supported with this model)");
-          // Clear the status after a few seconds
-          setTimeout(() => setToolStatus(""), 5000);
-        } catch (err2) {
-          throw new Error(`Connection failed: ${err2}`);
-        }
+      // Check if Gemini accepted the session
+      await new Promise((r) => setTimeout(r, 800));
+      if (!aliveRef.current) {
+        throw new Error("Session rejected by Gemini — check model/tools config");
       }
 
       if (abortRef.current) {
@@ -384,70 +324,48 @@ export function useVoiceSession() {
       }
 
       sessionRef.current = session;
-      console.log("[Voice] Session established and alive");
+      console.log("[Voice] Session alive");
 
-      // 4. Set up audio contexts
-      const playbackCtx = new AudioContext({ sampleRate: 24000 });
-      audioContextRef.current = playbackCtx;
+      // 3. Audio contexts
+      playbackCtxRef.current = new AudioContext({ sampleRate: 24000 });
 
-      // 5. Get mic access
-      console.log("[Voice] Requesting mic access...");
+      // 4. Mic access
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       micStreamRef.current = stream;
-      console.log("[Voice] Mic access granted");
 
-      if (abortRef.current || !sessionAliveRef.current) {
+      if (abortRef.current || !aliveRef.current) {
         stream.getTracks().forEach((t) => t.stop());
-        if (!abortRef.current) {
-          console.error("[Voice] Session died while waiting for mic permission");
-        }
         return;
       }
 
-      // 6. Set up audio capture at 16kHz
+      // 5. Mic capture at 16kHz → send to Gemini
       const micCtx = new AudioContext({ sampleRate: 16000 });
-      micContextRef.current = micCtx;
+      micCtxRef.current = micCtx;
       const source = micCtx.createMediaStreamSource(stream);
       const processor = micCtx.createScriptProcessor(4096, 1, 1);
 
       processor.onaudioprocess = (e) => {
-        // Check session is alive before sending
-        if (!sessionAliveRef.current || !sessionRef.current || abortRef.current) return;
+        if (!aliveRef.current || !sessionRef.current || abortRef.current) return;
 
-        const inputData = e.inputBuffer.getChannelData(0);
-
-        // Convert Float32 to Int16
-        const int16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
+        const input = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          const s = Math.max(-1, Math.min(1, input[i]));
           int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
 
-        // Convert to base64
         const bytes = new Uint8Array(int16.buffer);
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
 
         try {
           sessionRef.current.sendRealtimeInput({
-            audio: {
-              data: base64,
-              mimeType: "audio/pcm;rate=16000",
-            } as any,
+            audio: { data: btoa(bin), mimeType: "audio/pcm;rate=16000" } as any,
           });
         } catch {
-          // Session may have closed — stop sending
-          sessionAliveRef.current = false;
+          aliveRef.current = false;
         }
       };
 
@@ -455,69 +373,54 @@ export function useVoiceSession() {
       processor.connect(micCtx.destination);
       processorRef.current = processor;
 
-      console.log("[Voice] Audio pipeline ready — listening");
+      console.log("[Voice] Ready — listening");
+      addTranscript("status", "Connected — listening");
       setState("listening");
     } catch (err) {
       console.error("[Voice] Connect error:", err);
       setError(`Failed to connect: ${err}`);
       setState("error");
     }
-  }, [state, handleMessage]);
+  }, [state, handleMessage, addTranscript]);
 
   // ---- Disconnect ----
 
   const disconnect = useCallback(() => {
     abortRef.current = true;
-    sessionAliveRef.current = false;
+    aliveRef.current = false;
 
-    // Stop mic
+    if (toolAbortRef.current) {
+      toolAbortRef.current.abort();
+      toolAbortRef.current = null;
+    }
     if (micStreamRef.current) {
       micStreamRef.current.getTracks().forEach((t) => t.stop());
       micStreamRef.current = null;
     }
-
-    // Disconnect audio processor
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
     }
-
-    // Close mic audio context
-    if (micContextRef.current) {
-      micContextRef.current.close();
-      micContextRef.current = null;
+    if (micCtxRef.current) {
+      micCtxRef.current.close();
+      micCtxRef.current = null;
     }
-
-    // Close playback audio context
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+    if (playbackCtxRef.current) {
+      playbackCtxRef.current.close();
+      playbackCtxRef.current = null;
     }
-
-    // Close Gemini session
     if (sessionRef.current) {
-      try {
-        sessionRef.current.close();
-      } catch (err) {
-        console.warn("[Voice] Error closing session:", err);
-      }
+      try { sessionRef.current.close(); } catch { /* ok */ }
       sessionRef.current = null;
     }
 
-    // Clear playback queue
     playbackQueueRef.current.length = 0;
     isPlayingRef.current = false;
-
+    cancelledToolIdsRef.current.clear();
     setToolStatus("");
     setError("");
     setState("idle");
   }, []);
 
-  return {
-    state,
-    toolStatus,
-    error,
-    connect,
-    disconnect,
-  };
+  return { state, toolStatus, error, transcript, connect, disconnect };
 }
