@@ -211,11 +211,10 @@ export function VoiceMode({ onClose }: Props) {
       <div className="mt-8 flex items-center gap-6">
         <button
           onClick={handleToggle}
-          className={`p-5 rounded-full transition-all duration-200 ${
-            state === "idle" || state === "error"
+          className={`p-5 rounded-full transition-all duration-200 ${state === "idle" || state === "error"
               ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30"
               : "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30"
-          }`}
+            }`}
           title={state === "idle" || state === "error" ? "Start voice" : "Stop voice"}
         >
           {state === "idle" || state === "error" ? (
