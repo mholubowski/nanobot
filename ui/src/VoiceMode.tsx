@@ -17,7 +17,7 @@ const STATE_LABELS: Record<VoiceState, string> = {
   connecting: "Connecting...",
   listening: "Listening",
   speaking: "Speaking",
-  processing: "Asking Nanobot...",
+  processing: "Asking Village...",
   error: "Error",
 };
 
@@ -157,8 +157,7 @@ export function VoiceMode({ onClose }: Props) {
   useEffect(() => {
     connect();
     return () => disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [connect, disconnect]);
 
   const handleToggle = () => {
     if (state === "idle" || state === "error") connect();
@@ -212,8 +211,8 @@ export function VoiceMode({ onClose }: Props) {
         <button
           onClick={handleToggle}
           className={`p-5 rounded-full transition-all duration-200 ${state === "idle" || state === "error"
-              ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30"
-              : "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30"
+            ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30"
+            : "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30"
             }`}
           title={state === "idle" || state === "error" ? "Start voice" : "Stop voice"}
         >

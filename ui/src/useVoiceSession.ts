@@ -2,6 +2,8 @@ import { useRef, useState, useCallback } from "react";
 import { GoogleGenAI, Modality } from "@google/genai";
 import type { Session, LiveServerMessage } from "@google/genai";
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
 export type VoiceState =
   | "idle"
   | "connecting"
@@ -24,206 +26,266 @@ type VoiceConfig = {
   tools: unknown[];
 };
 
+/** Gemini SDK doesn't export a type for embedded function calls in parts */
+type FunctionCallPart = {
+  functionCall?: { id?: string; name?: string; args?: Record<string, unknown> };
+};
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/** Gemini outputs audio at 24 kHz */
+const PLAYBACK_RATE = 24_000;
+
+/** Gemini expects mic input at 16 kHz */
+const MIC_RATE = 16_000;
+
+/** Accumulate ~100 ms of audio before scheduling a Web Audio buffer */
+const MIN_BUFFER_SAMPLES = 2_400;
+
+/** ScriptProcessor frame size for mic capture (4096 samples ≈ 256 ms at 16 kHz) */
+const MIC_FRAME_SIZE = 4096;
+
+// ── PCM helpers ──────────────────────────────────────────────────────────────
+
+/** Decode base64-encoded PCM into an Int16Array */
+function decodePCM(b64: string): Int16Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+/** Encode Uint8Array to base64 (chunked to stay within call-stack limits) */
+function toBase64(bytes: Uint8Array): string {
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += 8192) {
+    const chunk = bytes.subarray(i, i + 8192);
+    parts.push(String.fromCharCode.apply(null, chunk as unknown as number[]));
+  }
+  return btoa(parts.join(""));
+}
+
+/** Float32 → Int16 PCM conversion (clamps to [-1, 1]) */
+function float32ToInt16(input: Float32Array): Int16Array {
+  const out = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+// ── Hook ─────────────────────────────────────────────────────────────────────
+
 /**
- * Custom hook that manages a Gemini Live API voice session.
+ * Manages a Gemini Live API voice session.
  *
- * The voice model is a thin conversational layer — all real work is
- * delegated to Nanobot via the single `ask_nanobot` tool.
+ * Audio pipeline:
+ *   Mic (16 kHz PCM) → WebSocket → Gemini → WebSocket → Playback (24 kHz PCM)
+ *
+ * Playback uses direct Web Audio timeline scheduling — each buffer is placed
+ * at the exact timestamp after the previous one. No `onended` chaining, so
+ * main-thread jank can't create gaps between buffers.
+ *
+ * Tool calls are delegated to the Nanobot backend via POST /api/voice/tool.
  */
 export function useVoiceSession() {
+  // ── React state (drives UI) ──
   const [state, setState] = useState<VoiceState>("idle");
   const [toolStatus, setToolStatus] = useState("");
   const [error, setError] = useState("");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
 
+  // ── Refs (hot-path; avoids re-renders) ──
+
+  // Session & lifecycle
   const sessionRef = useRef<Session | null>(null);
-  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const aliveRef = useRef(false);
+  const abortRef = useRef(false);
+  const stateRef = useRef<VoiceState>("idle");
+
+  // Playback
+  const playCtxRef = useRef<AudioContext | null>(null);
+  const pendingRef = useRef<Int16Array[]>([]);
+  const pendingCountRef = useRef(0);
+  const nextPlayRef = useRef(0);
+  const sourcesRef = useRef(new Set<AudioBufferSourceNode>());
+
+  // Mic
   const micCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const playbackQueueRef = useRef<Int16Array[]>([]);
-  const pendingChunksRef = useRef<Int16Array[]>([]);
-  const pendingSamplesRef = useRef(0);
-  const isPlayingRef = useRef(false);
-  const nextPlayTimeRef = useRef(0);
-  const aliveRef = useRef(false);
-  const abortRef = useRef(false);
-  const cancelledToolIdsRef = useRef<Set<string>>(new Set());
+
+  // Tool calls
+  const cancelledIdsRef = useRef(new Set<string>());
   const toolAbortRef = useRef<AbortController | null>(null);
 
-  // ---- Helpers ----
+  // ── State helper (deduplicates renders + keeps ref in sync) ──
+
+  const setVoiceState = useCallback((next: VoiceState) => {
+    if (stateRef.current === next) return;
+    stateRef.current = next;
+    setState(next);
+  }, []);
 
   const addTranscript = useCallback(
-    (type: TranscriptEntry["type"], text: string) => {
-      setTranscript((prev) => [
-        ...prev,
-        { type, text, timestamp: Date.now() },
-      ]);
-    },
+    (type: TranscriptEntry["type"], text: string) =>
+      setTranscript((prev) => [...prev, { type, text, timestamp: Date.now() }]),
     [],
   );
 
-  // ---- Audio playback (24kHz data → system sample rate) ----
+  // ── Playback: direct Web Audio timeline scheduling ─────────────────────────
+  //
+  // Instead of chaining buffers via onended callbacks (which depend on the main
+  // thread dispatching the event promptly), we schedule each buffer at the exact
+  // timestamp following the previous one. The Web Audio scheduler runs on a
+  // high-priority audio thread, so gapless playback is immune to JS jank.
 
-  const playNextChunk = useCallback(() => {
-    const ctx = playbackCtxRef.current;
-    if (!ctx || playbackQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      nextPlayTimeRef.current = 0;
-      return;
-    }
+  /** Schedule one Int16 PCM buffer directly into the Web Audio timeline. */
+  const scheduleBuffer = useCallback((samples: Int16Array) => {
+    const ctx = playCtxRef.current;
+    if (!ctx) return;
 
-    isPlayingRef.current = true;
-    const samples = playbackQueueRef.current.shift()!;
-    const float32 = new Float32Array(samples.length);
-    for (let i = 0; i < samples.length; i++) {
-      float32[i] = samples[i] / 32768;
-    }
+    // Int16 → Float32 for Web Audio
+    const f32 = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 32768;
 
-    // Create buffer at 24kHz — Web Audio resamples to the context's native rate
-    const buffer = ctx.createBuffer(1, float32.length, 24000);
-    buffer.copyToChannel(float32, 0);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
+    // Web Audio resamples from PLAYBACK_RATE to the system's native rate
+    const buf = ctx.createBuffer(1, f32.length, PLAYBACK_RATE);
+    buf.copyToChannel(f32, 0);
 
-    // Schedule at exact time for gapless playback (no clicks between chunks)
-    const startTime = Math.max(ctx.currentTime, nextPlayTimeRef.current);
-    source.start(startTime);
-    nextPlayTimeRef.current = startTime + buffer.duration;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
 
-    source.onended = () => playNextChunk();
+    // Place right after the previous buffer for gapless playback
+    const start = Math.max(ctx.currentTime, nextPlayRef.current);
+    src.start(start);
+    nextPlayRef.current = start + buf.duration;
+
+    // Track so we can stop on interruption
+    sourcesRef.current.add(src);
+    src.onended = () => sourcesRef.current.delete(src);
   }, []);
 
-  // Minimum samples to accumulate before queueing for playback (~100ms at 24kHz)
-  const MIN_BUFFER_SAMPLES = 2400;
-
-  const flushPendingAudio = useCallback(() => {
-    const chunks = pendingChunksRef.current;
-    const total = pendingSamplesRef.current;
+  /** Concatenate accumulated pending chunks and schedule them. */
+  const flushPending = useCallback(() => {
+    const total = pendingCountRef.current;
     if (total === 0) return;
 
-    // Concatenate pending chunks into one buffer
     const combined = new Int16Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
+    let off = 0;
+    for (const chunk of pendingRef.current) {
+      combined.set(chunk, off);
+      off += chunk.length;
     }
-    pendingChunksRef.current = [];
-    pendingSamplesRef.current = 0;
+    pendingRef.current = [];
+    pendingCountRef.current = 0;
 
-    playbackQueueRef.current.push(combined);
-    if (!isPlayingRef.current) playNextChunk();
-  }, [playNextChunk]);
+    scheduleBuffer(combined);
+  }, [scheduleBuffer]);
 
+  /** Decode incoming base64 audio, accumulate, and flush when large enough. */
   const enqueueAudio = useCallback(
-    (base64Data: string) => {
+    (b64: string) => {
       try {
-        const bin = atob(base64Data);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-
-        // Accumulate small chunks into larger buffers
-        pendingChunksRef.current.push(int16);
-        pendingSamplesRef.current += int16.length;
-
-        if (pendingSamplesRef.current >= MIN_BUFFER_SAMPLES) {
-          flushPendingAudio();
-        }
+        const pcm = decodePCM(b64);
+        pendingRef.current.push(pcm);
+        pendingCountRef.current += pcm.length;
+        if (pendingCountRef.current >= MIN_BUFFER_SAMPLES) flushPending();
       } catch {
-        // skip malformed audio
+        /* skip malformed audio */
       }
     },
-    [flushPendingAudio],
+    [flushPending],
   );
 
-  // ---- Tool call handling ----
+  /** Immediately stop all playback and clear buffers (for interruptions). */
+  const stopPlayback = useCallback(() => {
+    for (const src of sourcesRef.current) {
+      try {
+        src.stop();
+      } catch {
+        /* already ended */
+      }
+    }
+    sourcesRef.current.clear();
+    pendingRef.current = [];
+    pendingCountRef.current = 0;
+    nextPlayRef.current = 0;
+  }, []);
+
+  // ── Tool call handling ─────────────────────────────────────────────────────
 
   const executeTool = useCallback(
     async (id: string, name: string, args: Record<string, unknown>) => {
       if (!sessionRef.current || !aliveRef.current) return;
 
-      console.log(`[Voice] Tool call: ${name}`, args);
-      setState("processing");
-      setToolStatus(`Asking Nanobot...`);
-      addTranscript("tool", `Asking: ${(args.question as string) ?? name}`);
+      console.log(`[voice] tool: ${name}`, args);
+      setVoiceState("processing");
+      setToolStatus("Asking Village…");
+      addTranscript("tool", `Asking Village: ${(args.question as string) ?? name}`);
 
-      const abortController = new AbortController();
-      toolAbortRef.current = abortController;
+      const ctrl = new AbortController();
+      toolAbortRef.current = ctrl;
 
-      let resultText = "No result";
-
+      let result = "No result";
       try {
         const res = await fetch("/api/voice/tool", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name, args }),
-          signal: abortController.signal,
+          signal: ctrl.signal,
         });
-
-        if (!res.ok) {
-          resultText = `Error: HTTP ${res.status}`;
-        } else {
-          const data = await res.json();
-          resultText = data.result ?? "No result";
-        }
+        result = res.ok
+          ? ((await res.json()).result ?? "No result")
+          : `Error: HTTP ${res.status}`;
       } catch (err: unknown) {
-        if ((err as Error).name === "AbortError") {
-          console.log(`[Voice] Tool call ${id} was aborted`);
-          return; // Don't send response for aborted calls
-        }
-        resultText = `Error: ${err}`;
+        if ((err as Error).name === "AbortError") return; // aborted — don't respond
+        result = `Error: ${err}`;
       } finally {
         toolAbortRef.current = null;
       }
 
-      // Check if this tool call was cancelled while we were running
-      if (cancelledToolIdsRef.current.has(id)) {
-        console.log(`[Voice] Tool call ${id} was cancelled, skipping response`);
-        cancelledToolIdsRef.current.delete(id);
+      // Cancelled while the fetch was in-flight
+      if (cancelledIdsRef.current.has(id)) {
+        cancelledIdsRef.current.delete(id);
         return;
       }
 
       setToolStatus("");
-      console.log(`[Voice] Tool result (${resultText.length} chars):`, resultText.slice(0, 200));
-      addTranscript("agent", resultText);
+      console.log(`[voice] result (${result.length} chars):`, result.slice(0, 200));
+      addTranscript("agent", result);
 
-      // Send result back to Gemini
       try {
         sessionRef.current.sendToolResponse({
-          functionResponses: [{ id, name, response: { result: resultText } }],
+          functionResponses: [{ id, name, response: { result } }],
         });
-        setState("listening");
+        setVoiceState("listening");
       } catch (err) {
-        console.error("[Voice] sendToolResponse error:", err);
+        console.error("[voice] sendToolResponse failed:", err);
         setError(`Tool response failed: ${err}`);
-        setState("error");
+        setVoiceState("error");
       }
     },
-    [addTranscript],
+    [setVoiceState, addTranscript],
   );
 
-  // ---- Message handler ----
+  // ── WebSocket message handler ──────────────────────────────────────────────
 
   const handleMessage = useCallback(
     (msg: LiveServerMessage) => {
       try {
-        // Setup complete
-        if (msg.setupComplete) {
-          console.log("[Voice] Setup complete");
-          return;
-        }
+        if (msg.setupComplete) return;
 
-        // Top-level tool call
+        // Tool call request
         if (msg.toolCall?.functionCalls) {
           for (const fc of msg.toolCall.functionCalls) {
             executeTool(fc.id ?? "", fc.name ?? "unknown", fc.args ?? {}).catch(
               (err) => {
-                console.error("[Voice] Tool call error:", err);
+                console.error("[voice] tool error:", err);
                 setError(`Tool call failed: ${err}`);
-                setState("error");
+                setVoiceState("error");
               },
             );
           }
@@ -232,132 +294,125 @@ export function useVoiceSession() {
 
         // Tool call cancellation
         if (msg.toolCallCancellation?.ids) {
-          console.log("[Voice] Tool calls cancelled:", msg.toolCallCancellation.ids);
-          for (const id of msg.toolCallCancellation.ids) {
-            cancelledToolIdsRef.current.add(id);
-          }
-          // Abort the in-flight fetch if any
-          if (toolAbortRef.current) {
-            toolAbortRef.current.abort();
-            toolAbortRef.current = null;
-          }
+          for (const id of msg.toolCallCancellation.ids)
+            cancelledIdsRef.current.add(id);
+          toolAbortRef.current?.abort();
+          toolAbortRef.current = null;
           setToolStatus("");
-          setState("listening");
+          setVoiceState("listening");
           return;
         }
 
-        // Interruption — clear all audio
-        if (msg.serverContent && "interrupted" in msg.serverContent && (msg.serverContent as any).interrupted) {
-          pendingChunksRef.current = [];
-          pendingSamplesRef.current = 0;
-          playbackQueueRef.current.length = 0;
-          isPlayingRef.current = false;
-          nextPlayTimeRef.current = 0;
+        // Interruption — stop all audio immediately
+        const content = msg.serverContent as
+          | (Record<string, unknown> & typeof msg.serverContent)
+          | undefined;
+        if (content?.interrupted) {
+          stopPlayback();
           return;
         }
 
-        // Server content (audio + possible embedded function calls)
+        // Model turn (audio chunks + possible embedded tool calls)
         if (msg.serverContent?.modelTurn?.parts) {
           for (const part of msg.serverContent.modelTurn.parts) {
             // Audio data
-            if (part.inlineData && typeof part.inlineData.data === "string") {
-              setState("speaking");
-              enqueueAudio(part.inlineData.data);
+            if (part.inlineData?.data) {
+              setVoiceState("speaking");
+              enqueueAudio(part.inlineData.data as string);
             }
 
-            // Embedded function call (when model speaks then calls a tool in same turn)
-            if ((part as any).functionCall) {
-              const fc = (part as any).functionCall;
-              executeTool(fc.id ?? "", fc.name ?? "unknown", fc.args ?? {}).catch(
-                (err) => {
-                  console.error("[Voice] Embedded tool call error:", err);
-                  setError(`Tool call failed: ${err}`);
-                  setState("error");
-                },
-              );
+            // Embedded function call (model speaks then calls a tool in same turn)
+            const fc = (part as FunctionCallPart).functionCall;
+            if (fc) {
+              executeTool(
+                fc.id ?? "",
+                fc.name ?? "unknown",
+                fc.args ?? {},
+              ).catch((err) => {
+                console.error("[voice] embedded tool error:", err);
+                setError(`Tool call failed: ${err}`);
+                setVoiceState("error");
+              });
             }
           }
         }
 
-        // Turn complete — flush any remaining audio
+        // Turn complete — flush any remaining buffered audio
         if (msg.serverContent?.turnComplete) {
-          flushPendingAudio();
-          setState((prev) => (prev === "processing" ? prev : "listening"));
+          flushPending();
+          if (stateRef.current !== "processing") setVoiceState("listening");
         }
       } catch (err) {
-        console.error("[Voice] Message handler error:", err);
+        console.error("[voice] message handler error:", err);
       }
     },
-    [executeTool, enqueueAudio, flushPendingAudio],
+    [executeTool, enqueueAudio, flushPending, stopPlayback, setVoiceState],
   );
 
-  // ---- Connect ----
+  // ── Connect ────────────────────────────────────────────────────────────────
 
   const connect = useCallback(async () => {
-    if (state !== "idle" && state !== "error") return;
+    if (stateRef.current !== "idle" && stateRef.current !== "error") return;
 
-    setState("connecting");
+    setVoiceState("connecting");
     setError("");
     setTranscript([]);
     abortRef.current = false;
-    cancelledToolIdsRef.current.clear();
+    cancelledIdsRef.current.clear();
 
     try {
-      // 1. Get config from backend
-      console.log("[Voice] Fetching voice config...");
+      // 1. Fetch session config from backend
       const res = await fetch("/api/voice/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
       });
       if (!res.ok) throw new Error(`Token request failed: ${res.status}`);
-      const config: VoiceConfig = await res.json();
-      console.log("[Voice] Config:", { model: config.model, tokenType: config.tokenType });
+      const cfg: VoiceConfig = await res.json();
 
       if (abortRef.current) return;
 
-      // 2. Connect to Gemini Live API
-      const ai = new GoogleGenAI({ apiKey: config.token });
+      // 2. Open Gemini Live WebSocket
+      const ai = new GoogleGenAI({ apiKey: cfg.token });
       aliveRef.current = false;
 
-      console.log("[Voice] Connecting to Gemini...");
       const session = await ai.live.connect({
-        model: config.model,
+        model: cfg.model,
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: config.systemInstruction,
-          tools: config.tools as any,
+          systemInstruction: cfg.systemInstruction,
+          tools: cfg.tools as any, // Gemini SDK tool type boundary
         },
         callbacks: {
           onopen: () => {
-            console.log("[Voice] WebSocket connected");
+            console.log("[voice] ws connected");
             aliveRef.current = true;
           },
           onmessage: handleMessage,
           onerror: (e: ErrorEvent) => {
-            console.error("[Voice] WebSocket error:", e);
+            console.error("[voice] ws error:", e.message);
             aliveRef.current = false;
           },
           onclose: (e: CloseEvent) => {
-            console.log("[Voice] WebSocket closed:", e.code, e.reason);
+            console.log("[voice] ws closed:", e.code, e.reason);
             const wasAlive = aliveRef.current;
             aliveRef.current = false;
             if (wasAlive && sessionRef.current) {
               if (e.reason) {
                 setError(`Disconnected: ${e.reason}`);
-                setState("error");
+                setVoiceState("error");
               } else {
-                setState("idle");
+                setVoiceState("idle");
               }
             }
           },
         },
       });
 
-      // Check if Gemini accepted the session
+      // Brief wait for Gemini to accept the session
       await new Promise((r) => setTimeout(r, 800));
       if (!aliveRef.current) {
-        throw new Error("Session rejected by Gemini — check model/tools config");
+        throw new Error("Session rejected — check model/tools config");
       }
 
       if (abortRef.current) {
@@ -366,16 +421,18 @@ export function useVoiceSession() {
       }
 
       sessionRef.current = session;
-      console.log("[Voice] Session alive");
 
-      // 3. Audio context — use default system rate (48kHz typically)
-      // The createBuffer(1, length, 24000) tells Web Audio the data is 24kHz
-      // and it resamples to native rate internally (high quality)
-      playbackCtxRef.current = new AudioContext();
+      // 3. Playback context (system sample rate; Web Audio resamples from 24 kHz)
+      playCtxRef.current = new AudioContext();
 
       // 4. Mic access
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
       micStreamRef.current = stream;
 
@@ -384,90 +441,77 @@ export function useVoiceSession() {
         return;
       }
 
-      // 5. Mic capture at 16kHz → send to Gemini
-      const micCtx = new AudioContext({ sampleRate: 16000 });
+      // 5. Mic capture → 16 kHz PCM → Gemini
+      //    NOTE: ScriptProcessorNode is deprecated but universally supported.
+      //    Could be migrated to AudioWorkletNode for off-main-thread processing.
+      const micCtx = new AudioContext({ sampleRate: MIC_RATE });
       micCtxRef.current = micCtx;
-      const source = micCtx.createMediaStreamSource(stream);
-      const processor = micCtx.createScriptProcessor(4096, 1, 1);
+      const src = micCtx.createMediaStreamSource(stream);
+      const proc = micCtx.createScriptProcessor(MIC_FRAME_SIZE, 1, 1);
 
-      processor.onaudioprocess = (e) => {
+      proc.onaudioprocess = (e) => {
         if (!aliveRef.current || !sessionRef.current || abortRef.current) return;
 
-        const input = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          const s = Math.max(-1, Math.min(1, input[i]));
-          int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-
-        const bytes = new Uint8Array(int16.buffer);
-        let bin = "";
-        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-
+        const pcm = float32ToInt16(e.inputBuffer.getChannelData(0));
+        const b64 = toBase64(new Uint8Array(pcm.buffer));
         try {
           sessionRef.current.sendRealtimeInput({
-            audio: { data: btoa(bin), mimeType: "audio/pcm;rate=16000" } as any,
+            audio: { data: b64, mimeType: "audio/pcm;rate=16000" } as any,
           });
         } catch {
           aliveRef.current = false;
         }
       };
 
-      source.connect(processor);
-      processor.connect(micCtx.destination);
-      processorRef.current = processor;
+      src.connect(proc);
+      proc.connect(micCtx.destination);
+      processorRef.current = proc;
 
-      console.log("[Voice] Ready — listening");
       addTranscript("status", "Connected — listening");
-      setState("listening");
+      setVoiceState("listening");
     } catch (err) {
-      console.error("[Voice] Connect error:", err);
+      console.error("[voice] connect error:", err);
       setError(`Failed to connect: ${err}`);
-      setState("error");
+      setVoiceState("error");
     }
-  }, [state, handleMessage, addTranscript]);
+  }, [handleMessage, addTranscript, setVoiceState]);
 
-  // ---- Disconnect ----
+  // ── Disconnect ─────────────────────────────────────────────────────────────
 
   const disconnect = useCallback(() => {
     abortRef.current = true;
     aliveRef.current = false;
 
-    if (toolAbortRef.current) {
-      toolAbortRef.current.abort();
-      toolAbortRef.current = null;
-    }
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (micCtxRef.current) {
-      micCtxRef.current.close();
-      micCtxRef.current = null;
-    }
-    if (playbackCtxRef.current) {
-      playbackCtxRef.current.close();
-      playbackCtxRef.current = null;
-    }
-    if (sessionRef.current) {
-      try { sessionRef.current.close(); } catch { /* ok */ }
-      sessionRef.current = null;
-    }
+    // Abort in-flight tool call
+    toolAbortRef.current?.abort();
+    toolAbortRef.current = null;
 
-    pendingChunksRef.current = [];
-    pendingSamplesRef.current = 0;
-    playbackQueueRef.current.length = 0;
-    isPlayingRef.current = false;
-    nextPlayTimeRef.current = 0;
-    cancelledToolIdsRef.current.clear();
+    // Tear down mic
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    micCtxRef.current?.close();
+    micCtxRef.current = null;
+
+    // Tear down playback
+    stopPlayback();
+    playCtxRef.current?.close();
+    playCtxRef.current = null;
+
+    // Close WebSocket
+    try {
+      sessionRef.current?.close();
+    } catch {
+      /* ok */
+    }
+    sessionRef.current = null;
+
+    cancelledIdsRef.current.clear();
     setToolStatus("");
     setError("");
-    setState("idle");
-  }, []);
+    setVoiceState("idle");
+  }, [stopPlayback, setVoiceState]);
 
   return { state, toolStatus, error, transcript, connect, disconnect };
 }

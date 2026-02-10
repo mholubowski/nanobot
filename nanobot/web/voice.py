@@ -2,7 +2,7 @@
 
 Architecture: The Gemini voice model is a thin conversational layer.
 All real work (DB queries, codebase search, matchmaking, etc.) is delegated
-to Nanobot's full AgentLoop via a single `ask_nanobot` tool.
+to Village Agent via a single `ask_village` tool.
 """
 
 import asyncio
@@ -29,21 +29,21 @@ VOICE_TOOLS = [
     {
         "functionDeclarations": [
             {
-                "name": "ask_nanobot",
+                "name": "ask_village",
                 "description": (
-                    "Ask the Nanobot agent to look something up, query data, "
+                    "Ask the Village Agent to look something up, query data, "
                     "search code, run commands, find practitioners, or perform "
-                    "any task that requires tools. Nanobot has access to the "
+                    "any task that requires tools. Village Agent has access to the "
                     "Village database, codebase, and AI matchmaking service. "
                     "Pass the user's request as a natural language question. "
-                    "Nanobot will figure out how to answer it."
+                    "Village Agent will figure out how to answer it."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "The question or task to delegate to Nanobot",
+                            "description": "The question or task to delegate to Village Agent",
                         }
                     },
                     "required": ["question"],
@@ -61,16 +61,16 @@ You speak naturally and conversationally — this is a voice call, not a text ch
 Keep responses concise. Do not use markdown, bullet points, or any formatting \
 that doesn't work in speech.
 
-IMPORTANT: You have ONE tool called ask_nanobot. Use it whenever the user \
+IMPORTANT: You have ONE tool called ask_village. Use it whenever the user \
 asks anything that requires looking up data, querying the database, \
 searching code, finding practitioners, or any task that isn't pure conversation. \
-Pass the user's question as natural language — Nanobot will handle the rest.
+Pass the user's question as natural language — Village Agent will handle the rest.
 
-Examples of when to use ask_nanobot:
-- "How many practitioners are in the database?" → use ask_nanobot
-- "Who is the CEO of Village?" → use ask_nanobot
-- "What's the status of match request 123?" → use ask_nanobot
-- "How does authentication work in the codebase?" → use ask_nanobot
+Examples of when to use ask_village:
+- "How many practitioners are in the database?" → use ask_village
+- "Who is the CEO of Village?" → use ask_village
+- "What's the status of match request 123?" → use ask_village
+- "How does authentication work in the codebase?" → use ask_village
 
 Examples of when NOT to use it:
 - "Thanks!" → just respond naturally
@@ -79,17 +79,17 @@ Examples of when NOT to use it:
 - General knowledge questions unrelated to Village → just respond
 
 FINDING A PRACTITIONER: When a user wants to find a therapist or provider, \
-gather the following information conversationally BEFORE calling ask_nanobot:
+gather the following information conversationally BEFORE calling ask_village:
 1. What type of care? (speech therapy, occupational therapy, ABA, etc.)
 2. Child's age
 3. Zip code or city
 4. Insurance provider (or cash pay)
 5. Any specific needs or preferences (optional but helpful)
-Once you have at least items 1-4, call ask_nanobot with a detailed description \
+Once you have at least items 1-4, call ask_village with a detailed description \
 combining everything, for example: "Find a speech therapist near 90045 for a \
 5 year old with Anthem Blue Cross who needs help with articulation."
 
-When ask_nanobot is working, let the user know — it may take 10-30 seconds \
+When ask_village is working, let the user know — it may take 10-30 seconds \
 for complex queries. Say something like "Let me look that up" or "Give me a moment."
 
 When you get results back, summarize them naturally for voice. \
@@ -109,12 +109,14 @@ def init(agent: AgentLoop, gemini_api_key: str) -> None:
 async def get_voice_token(request: Request):
     """Generate a token and session config for Gemini Live API.
 
-    Returns the token, model, system instruction, and the single ask_nanobot
+    Returns the token, model, system instruction, and the single ask_village
     tool definition.
     """
     if not _gemini_api_key:
         return JSONResponse(
-            {"error": "Gemini API key not configured. Set providers.gemini.apiKey in ~/.nanobot/config.json"},
+            {
+                "error": "Gemini API key not configured. Set providers.gemini.apiKey in ~/.nanobot/config.json"
+            },
             status_code=500,
         )
 
@@ -122,7 +124,7 @@ async def get_voice_token(request: Request):
         return JSONResponse({"error": "Agent not initialized"}, status_code=500)
 
     model = VOICE_MODEL
-    logger.info(f"[Voice] Preparing session: model={model}, 1 tool (ask_nanobot)")
+    logger.info(f"[Voice] Preparing session: model={model}, 1 tool (ask_village)")
 
     # Try ephemeral token, fall back to API key for dev
     try:
@@ -161,8 +163,8 @@ async def get_voice_token(request: Request):
 async def execute_tool(request: Request):
     """Execute a tool call from the voice agent.
 
-    The only expected tool is `ask_nanobot`, which runs the question through
-    Nanobot's full AgentLoop (same brain as text chat).
+    The only expected tool is `ask_village`, which runs the question through
+    Village Agent's full AgentLoop (same brain as text chat).
     """
     if not _agent:
         return JSONResponse({"error": "Agent not initialized"}, status_code=500)
@@ -174,12 +176,12 @@ async def execute_tool(request: Request):
     if not tool_name:
         return JSONResponse({"error": "Missing tool name"}, status_code=400)
 
-    if tool_name == "ask_nanobot":
+    if tool_name == "ask_village":
         question = tool_args.get("question", "")
         if not question:
             return {"result": "No question provided."}
 
-        logger.info(f"[Voice] ask_nanobot: {question[:200]}")
+        logger.info(f"[Voice] ask_village: {question[:200]}")
 
         try:
             result = await asyncio.wait_for(
@@ -191,12 +193,14 @@ async def execute_tool(request: Request):
                 ),
                 timeout=120.0,
             )
-            logger.info(f"[Voice] ask_nanobot result: {(result or '')[:200]}")
+            logger.info(f"[Voice] ask_village result: {(result or '')[:200]}")
             return {"result": result or "No answer."}
         except asyncio.TimeoutError:
-            return {"result": "Sorry, that query took too long. Please try a simpler question."}
+            return {
+                "result": "Sorry, that query took too long. Please try a simpler question."
+            }
         except Exception as e:
-            logger.error(f"[Voice] ask_nanobot error: {e}")
+            logger.error(f"[Voice] ask_village error: {e}")
             return {"result": f"Error: {str(e)}"}
 
     # Fallback for any other tool name (shouldn't happen)
