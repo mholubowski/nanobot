@@ -5,3 +5,109 @@
   --color-village-dark: #267558;
   --color-village-light: #59AE8A;
 }
+
+/* Agent message markdown styling */
+.agent-prose h1,
+.agent-prose h2,
+.agent-prose h3,
+.agent-prose h4 {
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  color: var(--color-zinc-100);
+}
+
+.agent-prose h1 { font-size: 1.1em; }
+.agent-prose h2 { font-size: 1.05em; }
+.agent-prose h3 { font-size: 1em; }
+
+.agent-prose h1:first-child,
+.agent-prose h2:first-child,
+.agent-prose h3:first-child {
+  margin-top: 0;
+}
+
+.agent-prose p {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+  line-height: 1.7;
+}
+
+.agent-prose p:first-child {
+  margin-top: 0;
+}
+
+.agent-prose ul,
+.agent-prose ol {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  padding-left: 1.5em;
+}
+
+.agent-prose li {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+  line-height: 1.65;
+}
+
+.agent-prose li > p {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.agent-prose strong {
+  color: var(--color-zinc-100);
+  font-weight: 600;
+}
+
+.agent-prose code:not(pre code) {
+  background: var(--color-zinc-800);
+  border: 1px solid var(--color-zinc-700);
+  border-radius: 4px;
+  padding: 0.15em 0.35em;
+  font-size: 0.85em;
+}
+
+.agent-prose pre {
+  background: var(--color-zinc-900);
+  border: 1px solid var(--color-zinc-700);
+  border-radius: 8px;
+  padding: 0.75em 1em;
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+.agent-prose hr {
+  border-color: var(--color-zinc-700);
+  margin-top: 1.25em;
+  margin-bottom: 1.25em;
+}
+
+.agent-prose table {
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+  font-size: 0.9em;
+}
+
+.agent-prose th,
+.agent-prose td {
+  padding: 0.4em 0.75em;
+  border-color: var(--color-zinc-700);
+}
+
+.agent-prose blockquote {
+  border-left: 3px solid var(--color-village);
+  padding-left: 1em;
+  color: var(--color-zinc-400);
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.agent-prose a {
+  color: var(--color-village-light);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

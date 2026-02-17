@@ -51,7 +51,7 @@ export function MessageBubble({ message }: { message: Message }) {
 
             {/* Text response */}
             {message.content && (
-              <div className="prose prose-sm prose-invert prose-zinc max-w-none text-sm text-zinc-200">
+              <div className="agent-prose prose prose-sm prose-invert prose-zinc max-w-none text-sm text-zinc-200 leading-relaxed">
                 <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
               </div>
             )}

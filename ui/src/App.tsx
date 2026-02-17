@@ -4,13 +4,16 @@ import {
   fetchSessions,
   fetchMessages,
   fetchSkills,
+  fetchTools,
   deleteSession as apiDeleteSession,
   type SessionInfo,
   type SkillInfo,
+  type ToolInfo,
 } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
 import { Sidebar } from "./Sidebar";
 import { SkillPanel } from "./SkillPanel";
+import { ToolPanel } from "./ToolPanel";
 import { VoiceMode } from "./VoiceMode";
 import { Send, Mic } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
@@ -46,7 +49,9 @@ export default function App() {
   const [sessionKey, setSessionKey] = useState(getInitialKey);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [tools, setTools] = useState<ToolInfo[]>([]);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
+  const [activeTool, setActiveTool] = useState<string | null | undefined>(undefined);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -69,8 +74,8 @@ export default function App() {
 
   useEffect(() => {
     refreshSessions();
-    // Load skills once on mount
     fetchSkills().then(setSkills);
+    fetchTools().then(setTools);
   }, [refreshSessions]);
 
   // Load message history when session key changes
@@ -212,11 +217,13 @@ export default function App() {
       <Sidebar
         sessions={sessions}
         skills={skills}
+        tools={tools}
         activeKey={sessionKey}
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
-        onSelectSkill={(name) => setActiveSkill(name)}
+        onSelectSkill={(name) => { setActiveSkill(name); setActiveTool(undefined); }}
+        onSelectTool={(name) => { setActiveTool(name); setActiveSkill(null); }}
       />
 
       {/* Skill detail panel — replaces chat when a skill is selected */}
@@ -225,6 +232,13 @@ export default function App() {
           <SkillPanel
             skillName={activeSkill}
             onClose={() => setActiveSkill(null)}
+          />
+        </div>
+      ) : activeTool !== undefined ? (
+        <div className="flex flex-col flex-1 min-w-0">
+          <ToolPanel
+            toolName={activeTool}
+            onClose={() => setActiveTool(undefined)}
           />
         </div>
       ) : (
@@ -239,7 +253,7 @@ export default function App() {
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-zinc-600 gap-3">
               <VillageLogo className="size-12 text-village/40" />

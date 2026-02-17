@@ -224,6 +224,35 @@ def create_app(agent: AgentLoop, gemini_api_key: str = "") -> FastAPI:
         return {"name": name, "content": stripped}
 
     # ------------------------------------------------------------------
+    # GET /api/tools — list all registered tools with metadata
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tools")
+    async def list_tools():
+        results = []
+        for defn in agent.tools.get_definitions():
+            fn = defn.get("function", {})
+            params = fn.get("parameters", {})
+            props = params.get("properties", {})
+            required = params.get("required", [])
+
+            param_list = []
+            for pname, pschema in props.items():
+                param_list.append({
+                    "name": pname,
+                    "type": pschema.get("type", "string"),
+                    "description": pschema.get("description", ""),
+                    "required": pname in required,
+                })
+
+            results.append({
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": param_list,
+            })
+        return results
+
+    # ------------------------------------------------------------------
     # GET /api/health
     # ------------------------------------------------------------------
 

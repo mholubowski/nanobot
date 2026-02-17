@@ -55,7 +55,7 @@ export function SkillPanel({ skillName, onClose }: Props) {
             <Loader2 className="size-5 animate-spin" />
           </div>
         ) : (
-          <div className="prose prose-sm prose-invert prose-zinc max-w-none text-sm text-zinc-300">
+          <div className="agent-prose prose prose-sm prose-invert prose-zinc max-w-none text-sm text-zinc-300 leading-relaxed">
             <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
           </div>
         )}

@@ -100,6 +100,32 @@ export async function deleteSession(key: string): Promise<boolean> {
 }
 
 // ------------------------------------------------------------------
+// Tools
+// ------------------------------------------------------------------
+
+export type ToolParam = {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+};
+
+export type ToolInfo = {
+  name: string;
+  description: string;
+  parameters: ToolParam[];
+};
+
+/**
+ * Fetch the list of all registered tools.
+ */
+export async function fetchTools(): Promise<ToolInfo[]> {
+  const res = await fetch("/api/tools");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+// ------------------------------------------------------------------
 // Skills
 // ------------------------------------------------------------------
 
