@@ -7,20 +7,29 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.village_api import VillageApiTool
+from nanobot.config.schema import VillageConfig
+from nanobot.web.village_auth import VillageTokenStore
 from nanobot.web.voice import router as voice_router, init as voice_init
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(agent: AgentLoop, gemini_api_key: str = "") -> FastAPI:
+def create_app(
+    agent: AgentLoop,
+    gemini_api_key: str = "",
+    village_config: VillageConfig | None = None,
+) -> FastAPI:
     """Create the FastAPI application.
 
     Args:
         agent: An initialised AgentLoop instance.
+        gemini_api_key: Optional Gemini API key for voice mode.
+        village_config: Optional Village API OAuth configuration.
 
     Returns:
         A configured FastAPI app.
@@ -38,6 +47,24 @@ def create_app(agent: AgentLoop, gemini_api_key: str = "") -> FastAPI:
     # Voice mode endpoints (Gemini Live API)
     voice_init(agent, gemini_api_key)
     app.include_router(voice_router)
+
+    # Village OAuth token store (shared across endpoints and agent tool)
+    village_cfg = village_config
+    village_tokens: VillageTokenStore | None = None
+    if village_cfg and village_cfg.client_id:
+        village_tokens = VillageTokenStore(
+            base_url=village_cfg.base_url,
+            client_id=village_cfg.client_id,
+            client_secret=village_cfg.client_secret,
+        )
+        app.state.village_tokens = village_tokens
+
+        # Register the village_api tool so the agent can make API calls
+        village_tool = VillageApiTool(
+            token_store=village_tokens,
+            base_url=village_cfg.base_url,
+        )
+        agent.tools.register(village_tool)
 
     # ------------------------------------------------------------------
     # POST /api/chat — SSE streaming endpoint
@@ -251,6 +278,107 @@ def create_app(agent: AgentLoop, gemini_api_key: str = "") -> FastAPI:
                 "parameters": param_list,
             })
         return results
+
+    # ------------------------------------------------------------------
+    # Village OAuth endpoints
+    # ------------------------------------------------------------------
+
+    @app.get("/api/village/authorize_url")
+    async def village_authorize_url(request: Request, session_key: str = ""):
+        if not village_cfg or not village_cfg.client_id:
+            return JSONResponse({"error": "Village integration not configured"}, status_code=501)
+
+        # Build the redirect URI from the request's origin
+        base = str(request.base_url).rstrip("/")
+        redirect_uri = f"{base}/oauth/callback"
+
+        url = (
+            f"{village_cfg.base_url}/oauth/authorize"
+            f"?client_id={village_cfg.client_id}"
+            f"&redirect_uri={redirect_uri}"
+            f"&response_type=code"
+            f"&scope=public"
+        )
+        return {"url": url, "redirect_uri": redirect_uri}
+
+    @app.post("/api/village/callback")
+    async def village_callback(request: Request):
+        if not village_tokens:
+            return JSONResponse({"error": "Village integration not configured"}, status_code=501)
+
+        body = await request.json()
+        code = body.get("code", "")
+        session_key = body.get("session_key", "")
+        redirect_uri = body.get("redirect_uri", "")
+
+        if not code or not session_key:
+            return JSONResponse({"error": "Missing code or session_key"}, status_code=400)
+
+        # Ensure web session prefix
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        try:
+            token = await village_tokens.exchange_code(code, redirect_uri, session_key)
+            return {
+                "connected": True,
+                "user_email": token.user_email,
+                "user_id": token.user_id,
+            }
+        except Exception as e:
+            return JSONResponse({"error": f"OAuth exchange failed: {e}"}, status_code=400)
+
+    @app.get("/api/village/status")
+    async def village_status(session_key: str = ""):
+        if not village_tokens:
+            return {"configured": False, "connected": False}
+
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        token = village_tokens.get(session_key)
+        if token:
+            return {
+                "configured": True,
+                "connected": True,
+                "user_email": token.user_email,
+                "user_id": token.user_id,
+            }
+        return {"configured": True, "connected": False}
+
+    @app.post("/api/village/disconnect")
+    async def village_disconnect(request: Request):
+        if not village_tokens:
+            return {"disconnected": True}
+
+        body = await request.json()
+        session_key = body.get("session_key", "")
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        village_tokens.remove(session_key)
+        return {"disconnected": True}
+
+    # ------------------------------------------------------------------
+    # GET /oauth/callback — lightweight page for OAuth popup redirect
+    # ------------------------------------------------------------------
+
+    OAUTH_CALLBACK_HTML = """<!DOCTYPE html>
+<html><head><title>Connecting...</title></head>
+<body><p>Connecting to Village...</p><script>
+const code = new URLSearchParams(window.location.search).get("code");
+if (code && window.opener) {
+  window.opener.postMessage({ type: "village_oauth_callback", code }, "*");
+  document.body.innerHTML = "<p>Connected! You can close this window.</p>";
+} else {
+  document.body.innerHTML = "<p>Error: missing authorization code.</p>";
+}
+setTimeout(() => window.close(), 1500);
+</script></body></html>"""
+
+    @app.get("/oauth/callback")
+    async def oauth_callback():
+        return HTMLResponse(content=OAUTH_CALLBACK_HTML)
 
     # ------------------------------------------------------------------
     # GET /api/health

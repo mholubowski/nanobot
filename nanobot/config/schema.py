@@ -256,11 +256,20 @@ class MCPServerConfig(Base):
     url: str = ""  # HTTP: streamable HTTP endpoint URL
 
 
+class VillageConfig(Base):
+    """Village platform API integration (OAuth2 via Doorkeeper)."""
+
+    base_url: str = "http://localhost:3000"
+    client_id: str = ""
+    client_secret: str = ""
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    village: VillageConfig = Field(default_factory=VillageConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

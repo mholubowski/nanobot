@@ -126,6 +126,63 @@ export async function fetchTools(): Promise<ToolInfo[]> {
 }
 
 // ------------------------------------------------------------------
+// Village OAuth
+// ------------------------------------------------------------------
+
+export type VillageStatus = {
+  configured: boolean;
+  connected: boolean;
+  user_email?: string;
+  user_id?: number;
+};
+
+/**
+ * Check whether Village is configured and connected for this session.
+ */
+export async function fetchVillageStatus(sessionKey: string): Promise<VillageStatus> {
+  const res = await fetch(`/api/village/status?session_key=${encodeURIComponent(sessionKey)}`);
+  if (!res.ok) return { configured: false, connected: false };
+  return res.json();
+}
+
+/**
+ * Get the Village OAuth authorization URL.
+ */
+export async function fetchVillageAuthorizeUrl(sessionKey: string): Promise<{ url: string; redirect_uri: string } | null> {
+  const res = await fetch(`/api/village/authorize_url?session_key=${encodeURIComponent(sessionKey)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Exchange an OAuth authorization code for tokens.
+ */
+export async function sendVillageCallback(
+  code: string,
+  sessionKey: string,
+  redirectUri: string,
+): Promise<{ connected: boolean; user_email?: string; user_id?: number } | null> {
+  const res = await fetch("/api/village/callback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, session_key: sessionKey, redirect_uri: redirectUri }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Disconnect from Village for this session.
+ */
+export async function disconnectVillage(sessionKey: string): Promise<void> {
+  await fetch("/api/village/disconnect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_key: sessionKey }),
+  });
+}
+
+// ------------------------------------------------------------------
 // Skills
 // ------------------------------------------------------------------
 

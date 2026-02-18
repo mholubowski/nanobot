@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { type SessionInfo, type SkillInfo, type ToolInfo } from "./adapter";
+import { type SessionInfo, type SkillInfo, type ToolInfo, type VillageStatus } from "./adapter";
 import {
   Plus,
   MessageSquare,
@@ -10,6 +10,8 @@ import {
   ChevronRight,
   Sparkles,
   Wrench,
+  Link,
+  Unlink,
 } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
@@ -32,24 +34,30 @@ type Props = {
   sessions: SessionInfo[];
   skills: SkillInfo[];
   tools: ToolInfo[];
+  villageStatus: VillageStatus;
   activeKey: string;
   onNewChat: () => void;
   onSelectSession: (key: string) => void;
   onDeleteSession: (key: string) => void;
   onSelectSkill: (name: string) => void;
   onSelectTool: (name: string | null) => void;
+  onConnectVillage: () => void;
+  onDisconnectVillage: () => void;
 };
 
 export function Sidebar({
   sessions,
   skills,
   tools,
+  villageStatus,
   activeKey,
   onNewChat,
   onSelectSession,
   onDeleteSession,
   onSelectSkill,
   onSelectTool,
+  onConnectVillage,
+  onDisconnectVillage,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -228,6 +236,37 @@ export function Sidebar({
           </div>
         )}
       </div>
+
+      {/* Village connection */}
+      {villageStatus.configured && (
+        <div className="border-t border-zinc-800 px-3 py-2.5">
+          {villageStatus.connected ? (
+            <div className="flex items-center gap-2">
+              <span className="size-2 rounded-full bg-green-500 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-zinc-400 truncate">
+                  {villageStatus.user_email || "Connected"}
+                </p>
+              </div>
+              <button
+                onClick={onDisconnectVillage}
+                className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
+                title="Disconnect from Village"
+              >
+                <Unlink className="size-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={onConnectVillage}
+              className="flex items-center gap-2 w-full rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+            >
+              <Link className="size-3.5" />
+              Connect to Village
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

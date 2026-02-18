@@ -487,7 +487,11 @@ def ui(
     )
 
     gemini_key = config.providers.gemini.api_key or ""
-    fastapi_app = create_app(agent, gemini_api_key=gemini_key)
+    fastapi_app = create_app(
+        agent,
+        gemini_api_key=gemini_key,
+        village_config=config.tools.village,
+    )
 
     url = f"http://localhost:{port}"
     if dev:

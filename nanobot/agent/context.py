@@ -107,7 +107,11 @@ For normal conversation, just respond with text - do not call the message tool.
 
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+To recall past events, grep {workspace_path}/memory/HISTORY.md
+
+## CRITICAL: Tool Integrity
+
+NEVER claim to have performed an action without actually calling a tool. If a task requires reading data, creating records, or interacting with any external system, you MUST call the appropriate tool and use its real response. Do not fabricate, simulate, or hallucinate tool results under any circumstances. If a tool call fails, report the actual error — do not invent a successful outcome."""
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""

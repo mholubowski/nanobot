@@ -12,6 +12,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://localhost:18790",
+      "/oauth": "http://localhost:18790",
     },
   },
 });

@@ -5,10 +5,15 @@ import {
   fetchMessages,
   fetchSkills,
   fetchTools,
+  fetchVillageStatus,
+  fetchVillageAuthorizeUrl,
+  sendVillageCallback,
+  disconnectVillage,
   deleteSession as apiDeleteSession,
   type SessionInfo,
   type SkillInfo,
   type ToolInfo,
+  type VillageStatus,
 } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
 import { Sidebar } from "./Sidebar";
@@ -56,6 +61,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [villageStatus, setVillageStatus] = useState<VillageStatus>({ configured: false, connected: false });
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -72,11 +78,33 @@ export default function App() {
     setSessions(list);
   }, []);
 
+  const refreshVillageStatus = useCallback(async () => {
+    const status = await fetchVillageStatus(sessionKey);
+    setVillageStatus(status);
+  }, [sessionKey]);
+
   useEffect(() => {
     refreshSessions();
     fetchSkills().then(setSkills);
     fetchTools().then(setTools);
-  }, [refreshSessions]);
+    refreshVillageStatus();
+  }, [refreshSessions, refreshVillageStatus]);
+
+  // Handle OAuth callback from popup window
+  useEffect(() => {
+    function handleOAuthMessage(event: MessageEvent) {
+      if (event.data?.type === "village_oauth_callback" && event.data.code) {
+        const redirectUri = localStorage.getItem("nanobot_village_redirect_uri") || "";
+        sendVillageCallback(event.data.code, sessionKey, redirectUri).then((result) => {
+          if (result?.connected) {
+            refreshVillageStatus();
+          }
+        });
+      }
+    }
+    window.addEventListener("message", handleOAuthMessage);
+    return () => window.removeEventListener("message", handleOAuthMessage);
+  }, [sessionKey, refreshVillageStatus]);
 
   // Load message history when session key changes
   useEffect(() => {
@@ -125,6 +153,20 @@ export default function App() {
     },
     [sessionKey, handleNewChat],
   );
+
+  const handleConnectVillage = useCallback(async () => {
+    const data = await fetchVillageAuthorizeUrl(sessionKey);
+    if (!data) return;
+    // Save redirect_uri so the callback handler can use it
+    localStorage.setItem("nanobot_village_redirect_uri", data.redirect_uri);
+    // Open Village login in a popup
+    window.open(data.url, "village_oauth", "width=600,height=700,popup=yes");
+  }, [sessionKey]);
+
+  const handleDisconnectVillage = useCallback(async () => {
+    await disconnectVillage(sessionKey);
+    refreshVillageStatus();
+  }, [sessionKey, refreshVillageStatus]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -218,12 +260,15 @@ export default function App() {
         sessions={sessions}
         skills={skills}
         tools={tools}
+        villageStatus={villageStatus}
         activeKey={sessionKey}
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onSelectSkill={(name) => { setActiveSkill(name); setActiveTool(undefined); }}
         onSelectTool={(name) => { setActiveTool(name); setActiveSkill(null); }}
+        onConnectVillage={handleConnectVillage}
+        onDisconnectVillage={handleDisconnectVillage}
       />
 
       {/* Skill detail panel — replaces chat when a skill is selected */}
