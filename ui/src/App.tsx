@@ -50,6 +50,13 @@ function getInitialKey(): string {
   return key;
 }
 
+const MODELS = [
+  { id: "gemini/gemini-3-flash-preview", label: "Gemini 3 Flash" },
+  { id: "gemini/gemini-3-pro-preview", label: "Gemini 3 Pro" },
+  { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+  { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6" },
+] as const;
+
 export default function App() {
   const [sessionKey, setSessionKey] = useState(getInitialKey);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -60,6 +67,9 @@ export default function App() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [model, setModel] = useState(
+    () => localStorage.getItem("nanobot_model") || MODELS[0].id,
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [villageStatus, setVillageStatus] = useState<VillageStatus>({ configured: false, connected: false });
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -193,6 +203,7 @@ export default function App() {
         text,
         sessionKey,
         abortController.signal,
+        model,
       )) {
         setMessages((prev) => {
           const updated = [...prev];
@@ -295,6 +306,21 @@ export default function App() {
           <h1 className="text-sm font-semibold text-zinc-200">
             Village Agent
           </h1>
+          <div className="ml-auto flex items-center gap-1 rounded-lg border border-zinc-700 p-0.5">
+            {MODELS.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => { setModel(m.id); localStorage.setItem("nanobot_model", m.id); }}
+                className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                  model === m.id
+                    ? "bg-village text-white"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
         </header>
 
         {/* Messages */}

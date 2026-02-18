@@ -299,12 +299,19 @@ def _make_provider(config: Config):
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
 
+    # Collect all configured API keys so the provider can switch at runtime
+    all_api_keys = {}
+    for name, provider_cfg in config.providers.model_dump().items():
+        if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
+            all_api_keys[name] = provider_cfg["api_key"]
+
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
         api_base=config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
+        all_api_keys=all_api_keys,
     )
 
 
@@ -468,11 +475,17 @@ def ui(
         console.print("[red]Error: No API key configured.[/red]")
         raise typer.Exit(1)
 
+    all_api_keys = {}
+    for name, provider_cfg in config.providers.model_dump().items():
+        if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
+            all_api_keys[name] = provider_cfg["api_key"]
+
     bus = MessageBus()
     provider = LiteLLMProvider(
         api_key=api_key,
         api_base=api_base,
         default_model=model,
+        all_api_keys=all_api_keys,
     )
 
     agent = AgentLoop(

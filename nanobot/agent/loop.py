@@ -492,6 +492,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         session_key: str = "web:default",
         channel: str = "web",
         chat_id: str = "default",
+        model_override: str | None = None,
     ) -> str:
         """
         Process a message with streaming events for the web UI.
@@ -543,10 +544,12 @@ Respond with ONLY valid JSON, no markdown fences."""
 
             await on_event("thinking", {})
 
+            effective_model = model_override or self.model
+
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=effective_model,
             )
 
             if response.has_tool_calls:

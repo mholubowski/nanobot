@@ -9,7 +9,7 @@ import litellm
 from litellm import acompletion
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.providers.registry import find_by_model, find_gateway
+from nanobot.providers.registry import find_by_model, find_by_name, find_gateway
 
 
 class LiteLLMProvider(LLMProvider):
@@ -28,19 +28,27 @@ class LiteLLMProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
+        all_api_keys: dict[str, str] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self._all_api_keys = all_api_keys or {}
         
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
         # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
         
-        # Configure environment variables
+        # Configure environment variables for the default provider
         if api_key:
             self._setup_env(api_key, api_base, default_model)
+
+        # Also set env vars for all other configured providers (enables runtime switching)
+        for prov_name, prov_key in self._all_api_keys.items():
+            spec = find_by_name(prov_name)
+            if spec and spec.env_key:
+                os.environ.setdefault(spec.env_key, prov_key)
         
         if api_base:
             litellm.api_base = api_base
@@ -74,6 +82,19 @@ class LiteLLMProvider(LLMProvider):
             resolved = resolved.replace("{api_base}", effective_base)
             os.environ.setdefault(env_name, resolved)
     
+    def _resolve_api_key(self, model: str) -> str | None:
+        """Look up the correct API key for the given model from all configured providers."""
+        if not self._all_api_keys:
+            return self.api_key
+
+        spec = find_by_model(model)
+        if spec and spec.name in self._all_api_keys:
+            key = self._all_api_keys[spec.name]
+            if key:
+                return key
+
+        return self.api_key
+
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
         if self._gateway:
@@ -140,9 +161,10 @@ class LiteLLMProvider(LLMProvider):
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
         
-        # Pass api_key directly — more reliable than env vars alone
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
+        # Resolve the correct API key for this model's provider
+        resolved_key = self._resolve_api_key(model)
+        if resolved_key:
+            kwargs["api_key"] = resolved_key
         
         # Pass api_base for custom endpoints
         if self.api_base:

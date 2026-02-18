@@ -90,6 +90,7 @@ def create_app(
             return JSONResponse({"error": "No message provided"}, status_code=400)
 
         # Use session_key from request, default to "web:default"
+        model_override: str | None = body.get("model")
         session_key = body.get("session_key", "web:default")
         # Ensure web sessions are prefixed
         if not session_key.startswith("web:"):
@@ -107,6 +108,7 @@ def create_app(
                     content=user_message,
                     on_event=on_event,
                     session_key=session_key,
+                    model_override=model_override,
                 )
             except Exception as exc:
                 await queue.put({

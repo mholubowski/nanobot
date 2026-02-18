@@ -27,11 +27,12 @@ export async function* streamChat(
   message: string,
   sessionKey: string,
   signal?: AbortSignal,
+  model?: string,
 ): AsyncGenerator<AgentEvent> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, session_key: sessionKey }),
+    body: JSON.stringify({ message, session_key: sessionKey, model }),
     signal,
   });
 
