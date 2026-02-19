@@ -127,15 +127,45 @@ export async function fetchTools(): Promise<ToolInfo[]> {
 }
 
 // ------------------------------------------------------------------
-// Village OAuth
+// Village environments + OAuth
 // ------------------------------------------------------------------
+
+export type VillageEnvironmentInfo = {
+  name: string;
+  base_url: string;
+  active: boolean;
+  connected: boolean;
+  user_email: string;
+};
 
 export type VillageStatus = {
   configured: boolean;
   connected: boolean;
+  environment?: string;
   user_email?: string;
   user_id?: number;
 };
+
+/**
+ * Fetch the list of configured Village environments.
+ */
+export async function fetchVillageEnvironments(sessionKey: string): Promise<VillageEnvironmentInfo[]> {
+  const res = await fetch(`/api/village/environments?session_key=${encodeURIComponent(sessionKey)}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/**
+ * Switch the active Village environment for this session.
+ */
+export async function switchVillageEnvironment(sessionKey: string, environment: string): Promise<boolean> {
+  const res = await fetch("/api/village/switch_environment", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_key: sessionKey, environment }),
+  });
+  return res.ok;
+}
 
 /**
  * Check whether Village is configured and connected for this session.

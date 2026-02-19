@@ -256,12 +256,42 @@ class MCPServerConfig(Base):
     url: str = ""  # HTTP: streamable HTTP endpoint URL
 
 
-class VillageConfig(Base):
-    """Village platform API integration (OAuth2 via Doorkeeper)."""
+class VillageEnvironment(Base):
+    """A single Village environment (local, staging, production, etc.)."""
 
+    name: str = ""
+    base_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+
+
+class VillageConfig(Base):
+    """Village platform API integration (OAuth2 via Doorkeeper).
+
+    Supports multiple environments. Falls back to legacy single-env fields
+    if 'environments' is empty but client_id is set.
+    """
+
+    # Legacy single-environment fields (backward compat)
     base_url: str = "http://localhost:3000"
     client_id: str = ""
     client_secret: str = ""
+
+    # Multi-environment support
+    environments: list[VillageEnvironment] = Field(default_factory=list)
+
+    def get_environments(self) -> list[VillageEnvironment]:
+        """Return configured environments, falling back to legacy single-env."""
+        if self.environments:
+            return [e for e in self.environments if e.client_id]
+        if self.client_id:
+            return [VillageEnvironment(
+                name="Default",
+                base_url=self.base_url,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )]
+        return []
 
 
 class ToolsConfig(Base):

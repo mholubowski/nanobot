@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { type SessionInfo, type SkillInfo, type ToolInfo, type VillageStatus } from "./adapter";
+import { type SessionInfo, type SkillInfo, type ToolInfo, type VillageEnvironmentInfo, type VillageStatus } from "./adapter";
 import {
   Plus,
   MessageSquare,
@@ -35,6 +35,7 @@ type Props = {
   skills: SkillInfo[];
   tools: ToolInfo[];
   villageStatus: VillageStatus;
+  villageEnvs: VillageEnvironmentInfo[];
   activeKey: string;
   onNewChat: () => void;
   onSelectSession: (key: string) => void;
@@ -43,6 +44,7 @@ type Props = {
   onSelectTool: (name: string | null) => void;
   onConnectVillage: () => void;
   onDisconnectVillage: () => void;
+  onSwitchVillageEnv: (envName: string) => void;
 };
 
 export function Sidebar({
@@ -50,6 +52,7 @@ export function Sidebar({
   skills,
   tools,
   villageStatus,
+  villageEnvs,
   activeKey,
   onNewChat,
   onSelectSession,
@@ -58,6 +61,7 @@ export function Sidebar({
   onSelectTool,
   onConnectVillage,
   onDisconnectVillage,
+  onSwitchVillageEnv,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -237,9 +241,28 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Village connection */}
-      {villageStatus.configured && (
-        <div className="border-t border-zinc-800 px-3 py-2.5">
+      {/* Village environment + connection */}
+      {villageEnvs.length > 0 && (
+        <div className="border-t border-zinc-800 px-3 py-2.5 space-y-2">
+          {/* Environment switcher */}
+          <div className="flex items-center gap-1 rounded-lg border border-zinc-700 p-0.5">
+            {villageEnvs.map((env) => (
+              <button
+                key={env.name}
+                onClick={() => onSwitchVillageEnv(env.name)}
+                className={`flex-1 px-1.5 py-1 text-[10px] rounded-md transition-colors truncate ${
+                  env.active
+                    ? "bg-village text-white"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+                title={env.base_url}
+              >
+                {env.name}
+              </button>
+            ))}
+          </div>
+
+          {/* Connection status / button */}
           {villageStatus.connected ? (
             <div className="flex items-center gap-2">
               <span className="size-2 rounded-full bg-green-500 shrink-0" />
@@ -259,7 +282,8 @@ export function Sidebar({
           ) : (
             <button
               onClick={onConnectVillage}
-              className="flex items-center gap-2 w-full rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+              disabled={!villageEnvs.some((e) => e.active)}
+              className="flex items-center gap-2 w-full rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Link className="size-3.5" />
               Connect to Village

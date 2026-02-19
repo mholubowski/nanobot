@@ -5,6 +5,8 @@ import {
   fetchMessages,
   fetchSkills,
   fetchTools,
+  fetchVillageEnvironments,
+  switchVillageEnvironment,
   fetchVillageStatus,
   fetchVillageAuthorizeUrl,
   sendVillageCallback,
@@ -13,6 +15,7 @@ import {
   type SessionInfo,
   type SkillInfo,
   type ToolInfo,
+  type VillageEnvironmentInfo,
   type VillageStatus,
 } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
@@ -72,6 +75,7 @@ export default function App() {
   );
   const [isLoading, setIsLoading] = useState(false);
   const [villageStatus, setVillageStatus] = useState<VillageStatus>({ configured: false, connected: false });
+  const [villageEnvs, setVillageEnvs] = useState<VillageEnvironmentInfo[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -89,8 +93,12 @@ export default function App() {
   }, []);
 
   const refreshVillageStatus = useCallback(async () => {
-    const status = await fetchVillageStatus(sessionKey);
+    const [status, envList] = await Promise.all([
+      fetchVillageStatus(sessionKey),
+      fetchVillageEnvironments(sessionKey),
+    ]);
     setVillageStatus(status);
+    setVillageEnvs(envList);
   }, [sessionKey]);
 
   useEffect(() => {
@@ -175,6 +183,11 @@ export default function App() {
 
   const handleDisconnectVillage = useCallback(async () => {
     await disconnectVillage(sessionKey);
+    refreshVillageStatus();
+  }, [sessionKey, refreshVillageStatus]);
+
+  const handleSwitchVillageEnv = useCallback(async (envName: string) => {
+    await switchVillageEnvironment(sessionKey, envName);
     refreshVillageStatus();
   }, [sessionKey, refreshVillageStatus]);
 
@@ -272,6 +285,7 @@ export default function App() {
         skills={skills}
         tools={tools}
         villageStatus={villageStatus}
+        villageEnvs={villageEnvs}
         activeKey={sessionKey}
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
@@ -280,6 +294,7 @@ export default function App() {
         onSelectTool={(name) => { setActiveTool(name); setActiveSkill(null); }}
         onConnectVillage={handleConnectVillage}
         onDisconnectVillage={handleDisconnectVillage}
+        onSwitchVillageEnv={handleSwitchVillageEnv}
       />
 
       {/* Skill detail panel — replaces chat when a skill is selected */}

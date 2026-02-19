@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.village_api import VillageApiTool
 from nanobot.config.schema import VillageConfig
-from nanobot.web.village_auth import VillageTokenStore
+from nanobot.web.village_auth import VillageEnvManager
 from nanobot.web.voice import router as voice_router, init as voice_init
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -48,22 +48,21 @@ def create_app(
     voice_init(agent, gemini_api_key)
     app.include_router(voice_router)
 
-    # Village OAuth token store (shared across endpoints and agent tool)
+    # Village multi-environment manager (token stores + active env tracking)
     village_cfg = village_config
-    village_tokens: VillageTokenStore | None = None
-    if village_cfg and village_cfg.client_id:
-        village_tokens = VillageTokenStore(
-            base_url=village_cfg.base_url,
-            client_id=village_cfg.client_id,
-            client_secret=village_cfg.client_secret,
+    env_manager = VillageEnvManager()
+    envs = village_cfg.get_environments() if village_cfg else []
+    for env in envs:
+        env_manager.add_env(
+            name=env.name,
+            base_url=env.base_url,
+            client_id=env.client_id,
+            client_secret=env.client_secret,
         )
-        app.state.village_tokens = village_tokens
+    app.state.village_env_manager = env_manager
 
-        # Register the village_api tool so the agent can make API calls
-        village_tool = VillageApiTool(
-            token_store=village_tokens,
-            base_url=village_cfg.base_url,
-        )
+    if envs:
+        village_tool = VillageApiTool(env_manager=env_manager)
         agent.tools.register(village_tool)
 
     # ------------------------------------------------------------------
@@ -282,21 +281,79 @@ def create_app(
         return results
 
     # ------------------------------------------------------------------
-    # Village OAuth endpoints
+    # Village environment + OAuth endpoints
     # ------------------------------------------------------------------
+
+    @app.get("/api/village/environments")
+    async def village_environments(session_key: str = ""):
+        """List configured Village environments and which is active."""
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        names = env_manager.env_names
+        active = env_manager.get_active(session_key)
+        results = []
+        for name in names:
+            store = env_manager.get_store(name)
+            base_url = env_manager.get_base_url(name) or ""
+            connected = False
+            user_email = ""
+            if store and active == name:
+                token = store.get(session_key)
+                if token:
+                    connected = True
+                    user_email = token.user_email
+            results.append({
+                "name": name,
+                "base_url": base_url,
+                "active": name == active,
+                "connected": connected,
+                "user_email": user_email,
+            })
+        return results
+
+    @app.post("/api/village/switch_environment")
+    async def village_switch_environment(request: Request):
+        """Switch the active Village environment for this session."""
+        body = await request.json()
+        env_name = body.get("environment", "")
+        session_key = body.get("session_key", "")
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        if env_name not in env_manager.env_names:
+            return JSONResponse({"error": f"Unknown environment: {env_name}"}, status_code=400)
+
+        # Disconnect from previous environment if any
+        prev = env_manager.get_active(session_key)
+        if prev and prev != env_name:
+            prev_store = env_manager.get_store(prev)
+            if prev_store:
+                prev_store.remove(session_key)
+
+        env_manager.set_active(session_key, env_name)
+        return {"active": env_name}
 
     @app.get("/api/village/authorize_url")
     async def village_authorize_url(request: Request, session_key: str = ""):
-        if not village_cfg or not village_cfg.client_id:
+        if not session_key.startswith("web:"):
+            session_key = f"web:{session_key}"
+
+        active_name = env_manager.get_active(session_key)
+        if not active_name:
+            return JSONResponse({"error": "No Village environment selected"}, status_code=400)
+
+        store = env_manager.get_store(active_name)
+        base_url = env_manager.get_base_url(active_name)
+        if not store or not base_url:
             return JSONResponse({"error": "Village integration not configured"}, status_code=501)
 
-        # Build the redirect URI from the request's origin
-        base = str(request.base_url).rstrip("/")
-        redirect_uri = f"{base}/oauth/callback"
+        redirect_base = str(request.base_url).rstrip("/")
+        redirect_uri = f"{redirect_base}/oauth/callback"
 
         url = (
-            f"{village_cfg.base_url}/oauth/authorize"
-            f"?client_id={village_cfg.client_id}"
+            f"{base_url}/oauth/authorize"
+            f"?client_id={store.client_id}"
             f"&redirect_uri={redirect_uri}"
             f"&response_type=code"
             f"&scope=public"
@@ -305,9 +362,6 @@ def create_app(
 
     @app.post("/api/village/callback")
     async def village_callback(request: Request):
-        if not village_tokens:
-            return JSONResponse({"error": "Village integration not configured"}, status_code=501)
-
         body = await request.json()
         code = body.get("code", "")
         session_key = body.get("session_key", "")
@@ -316,14 +370,22 @@ def create_app(
         if not code or not session_key:
             return JSONResponse({"error": "Missing code or session_key"}, status_code=400)
 
-        # Ensure web session prefix
         if not session_key.startswith("web:"):
             session_key = f"web:{session_key}"
 
+        active_name = env_manager.get_active(session_key)
+        if not active_name:
+            return JSONResponse({"error": "No Village environment selected"}, status_code=400)
+
+        store = env_manager.get_store(active_name)
+        if not store:
+            return JSONResponse({"error": "Village integration not configured"}, status_code=501)
+
         try:
-            token = await village_tokens.exchange_code(code, redirect_uri, session_key)
+            token = await store.exchange_code(code, redirect_uri, session_key)
             return {
                 "connected": True,
+                "environment": active_name,
                 "user_email": token.user_email,
                 "user_id": token.user_id,
             }
@@ -332,33 +394,43 @@ def create_app(
 
     @app.get("/api/village/status")
     async def village_status(session_key: str = ""):
-        if not village_tokens:
+        if not env_manager.env_names:
             return {"configured": False, "connected": False}
 
         if not session_key.startswith("web:"):
             session_key = f"web:{session_key}"
 
-        token = village_tokens.get(session_key)
-        if token:
-            return {
-                "configured": True,
-                "connected": True,
-                "user_email": token.user_email,
-                "user_id": token.user_id,
-            }
-        return {"configured": True, "connected": False}
+        active_name = env_manager.get_active(session_key)
+        if active_name:
+            store = env_manager.get_store(active_name)
+            if store:
+                token = store.get(session_key)
+                if token:
+                    return {
+                        "configured": True,
+                        "connected": True,
+                        "environment": active_name,
+                        "user_email": token.user_email,
+                        "user_id": token.user_id,
+                    }
+        return {
+            "configured": True,
+            "connected": False,
+            "environment": active_name or "",
+        }
 
     @app.post("/api/village/disconnect")
     async def village_disconnect(request: Request):
-        if not village_tokens:
-            return {"disconnected": True}
-
         body = await request.json()
         session_key = body.get("session_key", "")
         if not session_key.startswith("web:"):
             session_key = f"web:{session_key}"
 
-        village_tokens.remove(session_key)
+        active_name = env_manager.get_active(session_key)
+        if active_name:
+            store = env_manager.get_store(active_name)
+            if store:
+                store.remove(session_key)
         return {"disconnected": True}
 
     # ------------------------------------------------------------------

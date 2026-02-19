@@ -162,3 +162,55 @@ class VillageTokenStore:
         except Exception:
             pass
         return "", None
+
+
+class VillageEnvManager:
+    """Manages multiple Village environments and per-session environment selection.
+
+    Each environment has its own VillageTokenStore (with independent OAuth
+    credentials and base_url). Sessions are bound to an active environment
+    so the agent uses the correct tokens.
+    """
+
+    def __init__(self) -> None:
+        self._envs: dict[str, tuple[VillageTokenStore, str]] = {}  # name -> (store, base_url)
+        self._active: dict[str, str] = {}  # session_key -> env_name
+
+    def add_env(self, name: str, base_url: str, client_id: str, client_secret: str) -> None:
+        store = VillageTokenStore(
+            base_url=base_url,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        self._envs[name] = (store, base_url)
+
+    @property
+    def env_names(self) -> list[str]:
+        return list(self._envs.keys())
+
+    def get_store(self, env_name: str) -> VillageTokenStore | None:
+        env = self._envs.get(env_name)
+        return env[0] if env else None
+
+    def get_base_url(self, env_name: str) -> str | None:
+        env = self._envs.get(env_name)
+        return env[1] if env else None
+
+    # ── Per-session active environment ────────────────────────────────
+
+    def set_active(self, session_key: str, env_name: str) -> None:
+        self._active[session_key] = env_name
+
+    def get_active(self, session_key: str) -> str | None:
+        return self._active.get(session_key)
+
+    def get_active_store(self, session_key: str) -> VillageTokenStore | None:
+        env_name = self._active.get(session_key)
+        return self.get_store(env_name) if env_name else None
+
+    def get_active_base_url(self, session_key: str) -> str | None:
+        env_name = self._active.get(session_key)
+        return self.get_base_url(env_name) if env_name else None
+
+    def clear_active(self, session_key: str) -> None:
+        self._active.pop(session_key, None)

@@ -1,30 +1,33 @@
 """Village API tool — authenticated HTTP requests to Village's REST API."""
 
+from __future__ import annotations
+
 import json
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import httpx
 
 from nanobot.agent.tools.base import Tool
 
+if TYPE_CHECKING:
+    from nanobot.web.village_auth import VillageEnvManager
+
 logger = logging.getLogger(__name__)
 
-# Truncate large responses to avoid blowing up the LLM context
 MAX_RESPONSE_CHARS = 15_000
 
 
 class VillageApiTool(Tool):
     """Make authenticated HTTP requests to Village's REST API.
 
-    Uses the OAuth token of the currently connected Village user.
-    The token is looked up from the VillageTokenStore using the
-    current session key (set via set_context before each message).
+    Supports multiple Village environments (local, staging, production).
+    Uses VillageEnvManager to resolve the correct token store and base_url
+    for the active environment of the current session.
     """
 
-    def __init__(self, token_store: Any, base_url: str):
-        self._token_store = token_store  # VillageTokenStore
-        self._base_url = base_url.rstrip("/")
+    def __init__(self, env_manager: VillageEnvManager):
+        self._env_manager = env_manager
         self._session_key: str = ""
 
     def set_context(self, session_key: str) -> None:
@@ -86,23 +89,29 @@ class VillageApiTool(Tool):
         if not self._session_key:
             return "Error: No session context. Cannot determine which Village user to act as."
 
-        # Get a valid token (auto-refreshes if expired)
-        access_token = await self._token_store.ensure_valid_token(self._session_key)
+        token_store = self._env_manager.get_active_store(self._session_key)
+        base_url = self._env_manager.get_active_base_url(self._session_key)
+        if not token_store or not base_url:
+            return (
+                "Error: No Village environment selected or not connected. "
+                "Please ask the user to select an environment and click 'Connect to Village' in the sidebar."
+            )
+
+        access_token = await token_store.ensure_valid_token(self._session_key)
         if not access_token:
             return (
                 "Error: Not connected to Village. "
                 "Please ask the user to click 'Connect to Village' in the sidebar."
             )
 
-        # Build the full URL
-        url = f"{self._base_url}{path}"
+        url = f"{base_url}{path}"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
 
-        logger.info(f"[Village API] {method} {path}")
+        logger.info(f"[Village API] {method} {path} -> {base_url}")
 
         try:
             async with httpx.AsyncClient() as client:
@@ -115,7 +124,6 @@ class VillageApiTool(Tool):
                     timeout=30.0,
                 )
 
-            # Format the response
             status = resp.status_code
             try:
                 data = resp.json()
