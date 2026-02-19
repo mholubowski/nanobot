@@ -15,9 +15,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_RESPONSE_CHARS = 15_000
-
-
 class VillageApiTool(Tool):
     """Make authenticated HTTP requests to Village's REST API.
 
@@ -130,9 +127,6 @@ class VillageApiTool(Tool):
                 text = json.dumps(data, indent=2, default=str)
             except Exception:
                 text = resp.text
-
-            if len(text) > MAX_RESPONSE_CHARS:
-                text = text[:MAX_RESPONSE_CHARS] + f"\n... (truncated, {len(resp.text)} chars total)"
 
             if status >= 400:
                 return f"HTTP {status} Error:\n{text}"
