@@ -17,13 +17,14 @@ import {
   type ToolInfo,
   type VillageEnvironmentInfo,
   type VillageStatus,
+  type TokenUsage,
 } from "./adapter";
 import { MessageBubble } from "./MessageBubble";
 import { Sidebar } from "./Sidebar";
 import { SkillPanel } from "./SkillPanel";
 import { ToolPanel } from "./ToolPanel";
 import { VoiceMode } from "./VoiceMode";
-import { Send, Mic } from "lucide-react";
+import { Send, Mic, Zap } from "lucide-react";
 import { VillageLogo } from "./VillageLogo";
 
 export type ToolCall = {
@@ -74,6 +75,7 @@ export default function App() {
     () => localStorage.getItem("nanobot_model") || MODELS[0].id,
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [sessionUsage, setSessionUsage] = useState<TokenUsage>({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
   const [villageStatus, setVillageStatus] = useState<VillageStatus>({ configured: false, connected: false });
   const [villageEnvs, setVillageEnvs] = useState<VillageEnvironmentInfo[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -131,14 +133,35 @@ export default function App() {
       const history = await fetchMessages(sessionKey);
       if (cancelled) return;
       if (history.length > 0) {
-        setMessages(
-          history.map((m) => ({
+        let totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        const msgs: Message[] = history.map((m) => {
+          const msg: Message = {
             role: m.role as "user" | "assistant",
             content: m.content,
-          })),
-        );
+          };
+          if (m.tool_calls?.length) {
+            msg.toolCalls = m.tool_calls.map((tc) => ({
+              id: tc.id,
+              name: tc.name,
+              args: tc.args,
+              result: tc.result,
+              done: true,
+            }));
+          }
+          if (m.usage) {
+            totalUsage = {
+              prompt_tokens: totalUsage.prompt_tokens + m.usage.prompt_tokens,
+              completion_tokens: totalUsage.completion_tokens + m.usage.completion_tokens,
+              total_tokens: totalUsage.total_tokens + m.usage.total_tokens,
+            };
+          }
+          return msg;
+        });
+        setMessages(msgs);
+        setSessionUsage(totalUsage);
       } else {
         setMessages([]);
+        setSessionUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
       }
     })();
     return () => {
@@ -151,6 +174,7 @@ export default function App() {
     setSessionKey(key);
     localStorage.setItem("nanobot_session_key", key);
     setMessages([]);
+    setSessionUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
     setInput("");
     inputRef.current?.focus();
   }, []);
@@ -218,6 +242,15 @@ export default function App() {
         abortController.signal,
         model,
       )) {
+        if (event.type === "usage") {
+          setSessionUsage((prev) => ({
+            prompt_tokens: prev.prompt_tokens + event.call.prompt_tokens,
+            completion_tokens: prev.completion_tokens + event.call.completion_tokens,
+            total_tokens: prev.total_tokens + event.call.total_tokens,
+          }));
+          continue;
+        }
+
         setMessages((prev) => {
           const updated = [...prev];
           const last = { ...updated[updated.length - 1] };
@@ -321,6 +354,12 @@ export default function App() {
           <h1 className="text-sm font-semibold text-zinc-200">
             Village Agent
           </h1>
+          {sessionUsage.total_tokens > 0 && (
+            <div className="flex items-center gap-1 text-[11px] text-zinc-500" title={`Prompt: ${sessionUsage.prompt_tokens.toLocaleString()} | Completion: ${sessionUsage.completion_tokens.toLocaleString()} | Total: ${sessionUsage.total_tokens.toLocaleString()}`}>
+              <Zap className="size-3" />
+              <span>{sessionUsage.total_tokens >= 1000 ? `${(sessionUsage.total_tokens / 1000).toFixed(1)}k` : sessionUsage.total_tokens}</span>
+            </div>
+          )}
           <div className="ml-auto flex items-center gap-1 rounded-lg border border-zinc-700 p-0.5">
             {MODELS.map((m) => (
               <button

@@ -1,11 +1,18 @@
 /**
  * SSE event types emitted by the nanobot backend.
  */
+export type TokenUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
 export type AgentEvent =
   | { type: "thinking" }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string }
   | { type: "text"; content: string }
+  | { type: "usage"; call: TokenUsage; cumulative: TokenUsage }
   | { type: "error"; message: string };
 
 export type SessionInfo = {
@@ -14,10 +21,19 @@ export type SessionInfo = {
   updated_at: string;
 };
 
+export type HistoryToolCall = {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  result: string;
+};
+
 export type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  tool_calls?: HistoryToolCall[];
+  usage?: TokenUsage;
 };
 
 /**

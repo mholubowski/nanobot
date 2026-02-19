@@ -539,6 +539,10 @@ Respond with ONLY valid JSON, no markdown fences."""
         iteration = 0
         final_content = None
 
+        # Accumulate tool calls and token usage across the full agent loop
+        all_tool_calls: list[dict] = []
+        cumulative_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
         while iteration < self.max_iterations:
             iteration += 1
 
@@ -551,6 +555,15 @@ Respond with ONLY valid JSON, no markdown fences."""
                 tools=self.tools.get_definitions(),
                 model=effective_model,
             )
+
+            # Accumulate token usage from each LLM call
+            if response.usage:
+                for k in cumulative_usage:
+                    cumulative_usage[k] += response.usage.get(k, 0)
+                await on_event("usage", {
+                    "call": response.usage,
+                    "cumulative": dict(cumulative_usage),
+                })
 
             if response.has_tool_calls:
                 tool_call_dicts = [
@@ -582,6 +595,13 @@ Respond with ONLY valid JSON, no markdown fences."""
                         messages, tool_call.id, tool_call.name, result
                     )
 
+                    all_tool_calls.append({
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "args": tool_call.arguments,
+                        "result": result,
+                    })
+
                     await on_event("tool_result", {
                         "id": tool_call.id,
                         "name": tool_call.name,
@@ -596,9 +616,14 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         await on_event("text", {"content": final_content})
 
-        # Save to session
+        # Persist full conversation structure (tool calls, usage, and text)
         session.add_message("user", content)
-        session.add_message("assistant", final_content)
+        assistant_kwargs: dict = {}
+        if all_tool_calls:
+            assistant_kwargs["tool_calls"] = all_tool_calls
+        if any(v > 0 for v in cumulative_usage.values()):
+            assistant_kwargs["usage"] = cumulative_usage
+        session.add_message("assistant", final_content, **assistant_kwargs)
         self.sessions.save(session)
 
         return final_content

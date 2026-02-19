@@ -193,11 +193,16 @@ def create_app(
         for m in session.messages:
             if m.get("_type") == "metadata":
                 continue
-            messages.append({
+            msg: dict = {
                 "role": m.get("role", ""),
                 "content": m.get("content", ""),
                 "timestamp": m.get("timestamp", ""),
-            })
+            }
+            if "tool_calls" in m:
+                msg["tool_calls"] = m["tool_calls"]
+            if "usage" in m:
+                msg["usage"] = m["usage"]
+            messages.append(msg)
         return messages
 
     # ------------------------------------------------------------------
